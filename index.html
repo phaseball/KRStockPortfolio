@@ -1,0 +1,856 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>국내주식 포트폴리오</title>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<style>
+  :root {
+    --bg: #0e1014;
+    --bg-elev: #16191f;
+    --bg-card: #1c2028;
+    --border: #2a2f3a;
+    --text: #e8eaed;
+    --text-dim: #9aa0a6;
+    --text-faint: #5f6368;
+    --accent: #4f9cf9;
+    --gain: #00e676;
+    --loss: #ff5252;
+    --warn: #ffb74d;
+    --shadow: 0 4px 16px rgba(0,0,0,0.4);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard", "Noto Sans KR", sans-serif;
+    font-size: 14px; line-height: 1.5;
+  }
+  body { padding-bottom: 80px; }
+  .container { max-width: 1100px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 18px; font-weight: 600; }
+  h2 { font-size: 16px; font-weight: 600; margin-bottom: 12px; color: var(--text); }
+  .text-dim { color: var(--text-dim); }
+  .text-faint { color: var(--text-faint); }
+  .gain { color: var(--gain); }
+  .loss { color: var(--loss); }
+  .accent { color: var(--accent); }
+
+  /* Header */
+  .header {
+    background: var(--bg-elev); border-bottom: 1px solid var(--border);
+    padding: 12px 16px; display: flex; justify-content: space-between; align-items: center;
+    position: sticky; top: 0; z-index: 50;
+  }
+  .header-title { font-size: 16px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .header-actions { display: flex; gap: 8px; }
+  .icon-btn {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text); padding: 8px 12px; cursor: pointer; font-size: 13px;
+    display: inline-flex; align-items: center; gap: 4px; transition: all 0.15s;
+  }
+  .icon-btn:hover { background: var(--border); }
+  .icon-btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .icon-btn.primary:hover { filter: brightness(1.1); }
+  .icon-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  /* Nav tabs */
+  .nav {
+    display: flex; gap: 4px; padding: 12px 16px; background: var(--bg-elev);
+    border-bottom: 1px solid var(--border); overflow-x: auto;
+  }
+  .nav-btn {
+    background: transparent; border: 0; color: var(--text-dim); padding: 8px 14px;
+    font-size: 14px; cursor: pointer; border-radius: 8px; white-space: nowrap;
+    transition: all 0.15s;
+  }
+  .nav-btn:hover { color: var(--text); background: var(--bg-card); }
+  .nav-btn.active { color: var(--text); background: var(--bg-card); font-weight: 600; }
+
+  /* Cards */
+  .card {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 16px; box-shadow: var(--shadow);
+  }
+  .cards-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px; margin-bottom: 16px;
+  }
+  .summary-card { padding: 14px 16px; }
+  .summary-card .label { font-size: 12px; color: var(--text-dim); margin-bottom: 6px; }
+  .summary-card .value { font-size: 20px; font-weight: 700; letter-spacing: -0.3px; }
+  .summary-card .sub { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+
+  /* Holdings list */
+  .holding-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--border);
+    cursor: pointer; transition: background 0.1s;
+  }
+  .holding-row:hover { background: rgba(255,255,255,0.02); }
+  .holding-row:last-child { border-bottom: 0; }
+  .holding-name { font-weight: 600; font-size: 14px; }
+  .holding-code { font-size: 11px; color: var(--text-faint); font-family: ui-monospace, monospace; }
+  .holding-meta { font-size: 12px; color: var(--text-dim); margin-top: 3px; }
+  .holding-value { text-align: right; }
+  .holding-value .price { font-weight: 700; font-size: 15px; }
+  .holding-value .pl { font-size: 12px; margin-top: 3px; }
+
+  /* History table */
+  .history-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .history-table th, .history-table td {
+    padding: 10px 8px; text-align: right; border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .history-table th {
+    color: var(--text-dim); font-weight: 500; font-size: 12px;
+    background: var(--bg-elev); position: sticky; top: 0;
+  }
+  .history-table th:first-child, .history-table td:first-child { text-align: left; }
+  .history-table th:nth-child(2), .history-table td:nth-child(2) { text-align: left; }
+  .history-table tbody tr:hover { background: rgba(255,255,255,0.02); }
+
+  /* Inputs */
+  input[type="text"], input[type="number"], input[type="password"] {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); padding: 8px 10px; font-size: 14px; width: 100%;
+    font-family: inherit;
+  }
+  input:focus { outline: 0; border-color: var(--accent); }
+  label { display: block; font-size: 13px; color: var(--text-dim); margin-bottom: 4px; }
+  .field { margin-bottom: 12px; }
+
+  /* Toast */
+  #toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 16px; box-shadow: var(--shadow); display: none; z-index: 100;
+    max-width: 90%;
+  }
+  #toast.show { display: block; }
+  #toast.error { border-color: var(--loss); color: var(--loss); }
+  #toast.success { border-color: var(--gain); color: var(--gain); }
+
+  /* Empty state */
+  .empty {
+    text-align: center; padding: 60px 20px; color: var(--text-dim);
+  }
+  .empty .emoji { font-size: 32px; margin-bottom: 8px; }
+
+  /* Filter bar */
+  .filter-bar {
+    display: flex; gap: 8px; padding: 10px 0; flex-wrap: wrap; align-items: center;
+  }
+  .filter-bar select, .filter-bar input {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); padding: 6px 10px; font-size: 13px;
+    font-family: inherit;
+  }
+
+  /* Ticker history view */
+  .back-btn { background: transparent; border: 0; color: var(--accent); cursor: pointer; font-size: 14px; margin-bottom: 12px; padding: 4px 0; }
+  .back-btn:hover { text-decoration: underline; }
+
+  @media (max-width: 640px) {
+    .summary-card .value { font-size: 17px; }
+    .history-table { font-size: 12px; }
+    .history-table th, .history-table td { padding: 8px 4px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-title">📈 국내주식 포트폴리오</div>
+  <div class="header-actions">
+    <button class="icon-btn" id="refresh-btn" onclick="refreshAll()">🔄</button>
+    <button class="icon-btn primary" id="auth-btn" onclick="handleAuth()">로그인</button>
+  </div>
+</div>
+
+<div class="nav">
+  <button class="nav-btn active" data-tab="overview" onclick="switchTab('overview')">📊 개요</button>
+  <button class="nav-btn" data-tab="history" onclick="switchTab('history')">📜 거래내역</button>
+  <button class="nav-btn" data-tab="settings" onclick="switchTab('settings')">⚙️ 설정</button>
+</div>
+
+<div class="container">
+  <div id="tab-overview" class="tab-content"></div>
+  <div id="tab-history" class="tab-content" style="display:none"></div>
+  <div id="tab-settings" class="tab-content" style="display:none"></div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+// ============ CONFIG ============
+const STORAGE_KEY = 'kr_tracker_v1';
+const TX_TAB = '삼성국내';
+const NAMES_TAB = 'kr_names';
+const CONFIG_TAB = 'config_kr';
+const DAILY_TAB = 'daily_value_kr';
+
+// ============ STATE ============
+let state = {
+  clientId: '',
+  sheetId: '',
+  initialCash: 0,
+  accessToken: null,
+  tokenExpiry: 0,
+  transactions: [],
+  names: {},        // code → name
+  prices: {},       // code → {price, changeRate, asOf}
+  selectedCode: null,
+  currentTab: 'overview',
+};
+
+
+
+function saveLocal() {
+  const persist = {
+    clientId: state.clientId, sheetId: state.sheetId,
+    initialCash: state.initialCash,
+    transactions: state.transactions,
+    names: state.names, prices: state.prices,
+    accessToken: state.accessToken, tokenExpiry: state.tokenExpiry,
+  };
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(persist)); } catch (e) {}
+}
+
+function loadLocal() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const p = JSON.parse(raw);
+      Object.assign(state, p);
+    }
+  } catch (e) {}
+}
+
+// ============ UTILS ============
+function fmtKRW(n) {
+  if (n === null || n === undefined || isNaN(n)) return '—';
+  const sign = n < 0 ? '-' : '';
+  return sign + '₩' + Math.abs(Math.round(n)).toLocaleString('ko-KR');
+}
+function fmtNum(n) {
+  if (n === null || n === undefined || isNaN(n)) return '—';
+  return Math.round(n).toLocaleString('ko-KR');
+}
+function fmtPct(n) {
+  if (n === null || n === undefined || isNaN(n)) return '—';
+  const s = (n * 100).toFixed(2) + '%';
+  return n > 0 ? '+' + s : s;
+}
+function plClass(n) {
+  if (n === null || n === undefined || isNaN(n) || n === 0) return '';
+  return n > 0 ? 'gain' : 'loss';
+}
+function signed(n) {
+  if (n > 0) return '+' + n.toLocaleString('ko-KR');
+  return n.toLocaleString('ko-KR');
+}
+
+function toast(msg, type = '') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'show ' + type;
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { t.className = ''; }, 4000);
+}
+
+function stripA(code) { return code.startsWith('A') ? code.slice(1) : code; }
+
+// ============ AUTH ============
+let tokenClient = null;
+
+function initAuth() {
+  if (!state.clientId) return;
+  if (!window.google || !window.google.accounts) {
+    setTimeout(initAuth, 200);
+    return;
+  }
+  tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: state.clientId,
+    scope: 'https://www.googleapis.com/auth/spreadsheets',
+    callback: (resp) => {
+      if (resp.error) { toast('인증 실패: ' + resp.error, 'error'); return; }
+      state.accessToken = resp.access_token;
+      state.tokenExpiry = Date.now() + (resp.expires_in - 60) * 1000;
+      document.getElementById('auth-btn').textContent = '✓ 로그인됨';
+      toast('로그인 성공', 'success');
+      refreshAll();
+    },
+  });
+}
+
+function handleAuth() {
+  if (!state.clientId) { toast('설정에서 Google OAuth Client ID를 먼저 입력하세요', 'error'); switchTab('settings'); return; }
+  if (!tokenClient) initAuth();
+  if (tokenClient) tokenClient.requestAccessToken();
+}
+
+function isAuthed() { return state.accessToken && Date.now() < state.tokenExpiry; }
+
+// ============ GOOGLE SHEETS API ============
+async function sheetGet(range) {
+  if (!isAuthed()) throw new Error('인증 필요');
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${state.sheetId}/values/${encodeURIComponent(range)}`;
+  const r = await fetch(url, { headers: { Authorization: 'Bearer ' + state.accessToken } });
+  if (!r.ok) throw new Error('Sheet read failed: ' + r.status);
+  const d = await r.json();
+  return d.values || [];
+}
+
+async function sheetAppend(range, rows) {
+  if (!isAuthed()) throw new Error('인증 필요');
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${state.sheetId}/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED`;
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + state.accessToken, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ values: rows }),
+  });
+  if (!r.ok) throw new Error('Sheet write failed: ' + r.status);
+  return r.json();
+}
+
+async function sheetCreate(title) {
+  if (!isAuthed()) throw new Error('인증 필요');
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${state.sheetId}:batchUpdate`;
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + state.accessToken, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ requests: [{ addSheet: { properties: { title } } }] }),
+  });
+  return r.ok;
+}
+
+// ============ DATA LOADING ============
+async function loadTransactions() {
+  const rows = await sheetGet(`${TX_TAB}!A:F`);
+  if (rows.length < 2) return [];
+  const out = [];
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r[0]) continue;
+    out.push({
+      date: r[0],            // YYYY-MM-DD
+      code: r[1],
+      price: Number(r[2]) || 0,
+      qty: Number(r[3]) || 0,
+      fees: Number(r[4]) || 0,
+      settle: Number(r[5]) || 0,
+      seq: i,                // row-order seq
+    });
+  }
+  // Sort by date asc, then by seq for tie-break
+  out.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : a.seq - b.seq);
+  return out;
+}
+
+async function loadNames() {
+  try {
+    const rows = await sheetGet(`${NAMES_TAB}!A:B`);
+    const map = {};
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i][0] && rows[i][1]) map[rows[i][0]] = rows[i][1];
+    }
+    return map;
+  } catch (e) { return {}; }
+}
+
+async function loadConfig() {
+  try {
+    const rows = await sheetGet(`${CONFIG_TAB}!A:B`);
+    const cfg = {};
+    rows.forEach(r => { if (r[0]) cfg[r[0]] = r[1]; });
+    return cfg;
+  } catch (e) { return {}; }
+}
+
+// ============ PRICE FETCHING ============
+// Naver Finance API (via CORS proxy)
+const CORS_PROXIES = [
+  'https://corsproxy.io/?',
+  'https://api.allorigins.win/raw?url=',
+];
+
+async function fetchNaverPrice(code) {
+  const numCode = stripA(code);
+  const url = `https://m.stock.naver.com/api/stock/${numCode}/integration`;
+  for (const proxy of CORS_PROXIES) {
+    try {
+      const fullUrl = proxy === 'https://corsproxy.io/?'
+        ? proxy + encodeURIComponent(url)
+        : proxy + encodeURIComponent(url);
+      const r = await fetch(fullUrl, { signal: AbortSignal.timeout(8000) });
+      if (!r.ok) continue;
+      const d = await r.json();
+      // Naver integration response structure
+      const dealInfo = d.dealTrendInfos && d.dealTrendInfos[0];
+      const stock = d.stockInfo || d.totalInfos || {};
+      // Try different paths to find current price
+      let price = null, changeRate = null;
+      if (d.dealTrendInfos && d.dealTrendInfos.length > 0) {
+        price = Number(d.dealTrendInfos[0].closePrice);
+      }
+      if (!price && d.totalInfos) {
+        const cp = d.totalInfos.find(x => x.code === 'closePrice');
+        if (cp) price = Number(cp.value.replace(/,/g, ''));
+        const cr = d.totalInfos.find(x => x.code === 'fluctuationsRatio');
+        if (cr) changeRate = Number(cr.value) / 100;
+      }
+      if (price) {
+        return { price, changeRate, asOf: new Date().toISOString().slice(0, 10) };
+      }
+    } catch (e) { /* try next proxy */ }
+  }
+  return null;
+}
+
+async function fetchAllPrices(codes) {
+  const results = {};
+  const failed = [];
+  // sequential to avoid rate limiting
+  for (const code of codes) {
+    const p = await fetchNaverPrice(code);
+    if (p) results[code] = p;
+    else failed.push(code);
+  }
+  return { results, failed };
+}
+
+// ============ ANALYTICS ============
+function computeHoldings(txs) {
+  // FIFO per code. Returns: {code: {qty, avgCost, realizedPL, lots: [...]}}
+  const holds = {};
+  for (const tx of txs) {
+    if (!holds[tx.code]) holds[tx.code] = { qty: 0, totalCost: 0, avgCost: 0, realizedPL: 0, lots: [] };
+    const h = holds[tx.code];
+    if (tx.qty > 0) {
+      // Buy: settle already includes fees → use settle for cost basis
+      const costPerShare = tx.settle / tx.qty;
+      h.lots.push({ qty: tx.qty, cost: costPerShare, date: tx.date });
+      h.qty += tx.qty;
+      h.totalCost += tx.settle;
+    } else {
+      // Sell: settle is net proceeds (after fees deduction)
+      let sellQty = -tx.qty;
+      const netPerShare = tx.settle / sellQty;  // gross proceeds per share, net of fees
+      while (sellQty > 0 && h.lots.length > 0) {
+        const lot = h.lots[0];
+        const taken = Math.min(sellQty, lot.qty);
+        const lotCost = taken * lot.cost;
+        const lotProceeds = taken * netPerShare;
+        h.realizedPL += (lotProceeds - lotCost);
+        h.totalCost -= lotCost;
+        h.qty -= taken;
+        lot.qty -= taken;
+        if (lot.qty === 0) h.lots.shift();
+        sellQty -= taken;
+      }
+      // If sellQty > 0 still, means oversold (shouldn't happen) — ignore residual
+    }
+    h.avgCost = h.qty > 0 ? h.totalCost / h.qty : 0;
+  }
+  return holds;
+}
+
+function computeSummary(txs, holds, prices) {
+  let buyTotal = 0, sellTotal = 0, feesTotal = 0;
+  for (const tx of txs) {
+    feesTotal += tx.fees;
+    if (tx.qty > 0) buyTotal += tx.settle;
+    else sellTotal += tx.settle;
+  }
+  const cash = state.initialCash - buyTotal + sellTotal;
+  let marketValue = 0, unrealizedPL = 0, costBasis = 0, realizedPL = 0;
+  for (const code of Object.keys(holds)) {
+    const h = holds[code];
+    realizedPL += h.realizedPL;
+    if (h.qty > 0) {
+      costBasis += h.totalCost;
+      const p = prices[code] ? prices[code].price : null;
+      if (p) {
+        marketValue += h.qty * p;
+        unrealizedPL += h.qty * p - h.totalCost;
+      } else {
+        marketValue += h.totalCost;  // fall back to cost basis when no price
+      }
+    }
+  }
+  const totalAsset = cash + marketValue;
+  const totalGain = totalAsset - state.initialCash;
+  return { cash, marketValue, unrealizedPL, costBasis, realizedPL, totalAsset, totalGain, buyTotal, sellTotal, feesTotal };
+}
+
+// ============ RENDERING ============
+function switchTab(name) {
+  state.currentTab = name;
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+  document.querySelectorAll('.tab-content').forEach(t => t.style.display = 'none');
+  document.getElementById('tab-' + name).style.display = 'block';
+  if (name === 'overview') renderOverview();
+  else if (name === 'history') renderHistory();
+  else if (name === 'settings') renderSettings();
+}
+
+function renderOverview() {
+  const root = document.getElementById('tab-overview');
+  if (state.selectedCode) { renderTickerDetail(state.selectedCode); return; }
+
+  if (!state.transactions.length) {
+    root.innerHTML = `<div class="empty"><div class="emoji">📊</div><div>거래내역이 없습니다.</div>
+      <div style="margin-top:8px;font-size:12px">설정에서 Google Sheet 연결을 완료하세요.</div></div>`;
+    return;
+  }
+
+  const holds = computeHoldings(state.transactions);
+  const sum = computeSummary(state.transactions, holds, state.prices);
+
+  const cards = `
+    <div class="cards-grid">
+      <div class="card summary-card">
+        <div class="label">현금</div>
+        <div class="value">${fmtKRW(sum.cash)}</div>
+        <div class="sub">초기자본 ${fmtKRW(state.initialCash)}</div>
+      </div>
+      <div class="card summary-card">
+        <div class="label">평가금액 (보유)</div>
+        <div class="value">${fmtKRW(sum.marketValue)}</div>
+        <div class="sub">취득가 ${fmtKRW(sum.costBasis)}</div>
+      </div>
+      <div class="card summary-card">
+        <div class="label">총수익</div>
+        <div class="value ${plClass(sum.totalGain)}">${fmtKRW(sum.totalGain)}</div>
+        <div class="sub">총자산 ${fmtKRW(sum.totalAsset)}</div>
+      </div>
+      <div class="card summary-card">
+        <div class="label">실현손익 · 평가손익</div>
+        <div class="value ${plClass(sum.realizedPL)}" style="font-size:16px">${fmtKRW(sum.realizedPL)}</div>
+        <div class="sub ${plClass(sum.unrealizedPL)}">평가 ${fmtKRW(sum.unrealizedPL)}</div>
+      </div>
+    </div>
+  `;
+
+  // Holdings list (only those with qty > 0)
+  const heldCodes = Object.keys(holds).filter(c => holds[c].qty > 0);
+  heldCodes.sort((a, b) => {
+    const pa = state.prices[a] ? state.prices[a].price : holds[a].avgCost;
+    const pb = state.prices[b] ? state.prices[b].price : holds[b].avgCost;
+    return (holds[b].qty * pb) - (holds[a].qty * pa);
+  });
+
+  const holdingsHtml = heldCodes.length === 0
+    ? `<div class="empty"><div class="emoji">💼</div><div>현재 보유 종목 없음</div></div>`
+    : heldCodes.map(code => {
+        const h = holds[code];
+        const name = state.names[code] || code;
+        const priceObj = state.prices[code];
+        const curPrice = priceObj ? priceObj.price : null;
+        const value = curPrice ? h.qty * curPrice : null;
+        const upl = curPrice ? value - h.totalCost : null;
+        const uplPct = curPrice && h.avgCost > 0 ? (curPrice - h.avgCost) / h.avgCost : null;
+        return `
+          <div class="holding-row" onclick="selectTicker('${code}')">
+            <div>
+              <div class="holding-name">${escapeHtml(name)}</div>
+              <div class="holding-code">${code}</div>
+              <div class="holding-meta">${h.qty.toLocaleString()}주 · 평단 ${fmtNum(h.avgCost)} · 현재가 ${curPrice ? fmtNum(curPrice) : '—'}</div>
+            </div>
+            <div class="holding-value">
+              <div class="price">${value !== null ? fmtKRW(value) : fmtKRW(h.totalCost) + ' (취득가)'}</div>
+              <div class="pl ${plClass(upl)}">${upl !== null ? fmtKRW(upl) + ' (' + fmtPct(uplPct) + ')' : '—'}</div>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+  const holdingsCard = `<div class="card" style="padding:0">
+    <div style="padding:12px 14px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+      <h2 style="margin:0">보유 종목 (${heldCodes.length})</h2>
+      <div style="font-size:11px;color:var(--text-faint)">${pricesAsOfStr()}</div>
+    </div>
+    ${holdingsHtml}
+  </div>`;
+
+  root.innerHTML = cards + holdingsCard;
+}
+
+function pricesAsOfStr() {
+  const dates = Object.values(state.prices).map(p => p.asOf).filter(Boolean);
+  if (!dates.length) return '시세 미수집';
+  return '시세 기준: ' + dates.sort().slice(-1)[0];
+}
+
+function selectTicker(code) { state.selectedCode = code; renderOverview(); }
+
+function renderTickerDetail(code) {
+  const root = document.getElementById('tab-overview');
+  const name = state.names[code] || code;
+  const txs = state.transactions.filter(t => t.code === code);
+  const holds = computeHoldings(state.transactions);
+  const h = holds[code] || { qty: 0, avgCost: 0, totalCost: 0, realizedPL: 0 };
+  const priceObj = state.prices[code];
+  const curPrice = priceObj ? priceObj.price : null;
+  const value = curPrice && h.qty > 0 ? h.qty * curPrice : null;
+  const upl = value ? value - h.totalCost : null;
+  const uplPct = curPrice && h.avgCost > 0 ? (curPrice - h.avgCost) / h.avgCost : null;
+
+  const summary = `
+    <div class="cards-grid">
+      <div class="card summary-card"><div class="label">보유수량</div><div class="value">${h.qty.toLocaleString()}주</div><div class="sub">평단 ${fmtNum(h.avgCost)}</div></div>
+      <div class="card summary-card"><div class="label">현재가</div><div class="value">${curPrice ? fmtNum(curPrice) : '—'}</div><div class="sub">${priceObj && priceObj.changeRate !== null ? fmtPct(priceObj.changeRate) : ''}</div></div>
+      <div class="card summary-card"><div class="label">평가손익</div><div class="value ${plClass(upl)}">${fmtKRW(upl)}</div><div class="sub ${plClass(uplPct)}">${fmtPct(uplPct)}</div></div>
+      <div class="card summary-card"><div class="label">실현손익</div><div class="value ${plClass(h.realizedPL)}">${fmtKRW(h.realizedPL)}</div></div>
+    </div>
+  `;
+
+  // Transactions table for this code
+  const rows = [...txs].reverse().map(t => `
+    <tr>
+      <td>${t.date}</td>
+      <td class="${t.qty > 0 ? 'gain' : 'loss'}">${t.qty > 0 ? '매수' : '매도'}</td>
+      <td>${signed(t.qty)}</td>
+      <td>${fmtNum(t.price)}</td>
+      <td>${fmtNum(t.fees)}</td>
+      <td>${fmtNum(t.settle)}</td>
+    </tr>
+  `).join('');
+
+  root.innerHTML = `
+    <button class="back-btn" onclick="state.selectedCode=null;renderOverview()">← 보유 종목으로</button>
+    <h2 style="font-size:18px;margin-bottom:4px">${escapeHtml(name)}</h2>
+    <div style="font-size:12px;color:var(--text-faint);font-family:ui-monospace,monospace;margin-bottom:16px">${code}</div>
+    ${summary}
+    <div class="card" style="padding:0">
+      <div style="padding:12px 14px;border-bottom:1px solid var(--border)"><h2 style="margin:0">거래내역 (${txs.length})</h2></div>
+      <div style="overflow-x:auto"><table class="history-table">
+        <thead><tr><th>매매일</th><th>구분</th><th>수량</th><th>단가</th><th>수수료</th><th>정산금액</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>
+    </div>
+  `;
+}
+
+function renderHistory() {
+  const root = document.getElementById('tab-history');
+  if (!state.transactions.length) {
+    root.innerHTML = `<div class="empty"><div class="emoji">📜</div><div>거래내역이 없습니다.</div></div>`;
+    return;
+  }
+
+  // Build filter options
+  const codes = [...new Set(state.transactions.map(t => t.code))].sort();
+  const codeOpts = ['<option value="">전체 종목</option>']
+    .concat(codes.map(c => `<option value="${c}">${c} ${escapeHtml(state.names[c] || '')}</option>`))
+    .join('');
+
+  root.innerHTML = `
+    <div class="filter-bar">
+      <select id="filter-code" onchange="renderHistory()">${codeOpts}</select>
+      <select id="filter-dir" onchange="renderHistory()">
+        <option value="">매수+매도</option>
+        <option value="buy">매수만</option>
+        <option value="sell">매도만</option>
+      </select>
+      <span style="margin-left:auto;font-size:12px;color:var(--text-dim)" id="hist-count"></span>
+    </div>
+    <div class="card" style="padding:0">
+      <div style="overflow-x:auto">
+        <table class="history-table">
+          <thead><tr>
+            <th>매매일</th><th>종목</th><th>구분</th><th>수량</th><th>단가</th><th>수수료</th><th>정산금액</th>
+          </tr></thead>
+          <tbody id="hist-body"></tbody>
+        </table>
+      </div>
+    </div>
+  `;
+
+  // Restore filter selections if any
+  const prevCode = document.getElementById('filter-code') ? document.getElementById('filter-code').value : '';
+  const prevDir = document.getElementById('filter-dir') ? document.getElementById('filter-dir').value : '';
+
+  applyHistoryFilter();
+}
+
+function applyHistoryFilter() {
+  const codeSel = document.getElementById('filter-code');
+  const dirSel = document.getElementById('filter-dir');
+  const code = codeSel ? codeSel.value : '';
+  const dir = dirSel ? dirSel.value : '';
+
+  let rows = [...state.transactions].reverse();
+  if (code) rows = rows.filter(t => t.code === code);
+  if (dir === 'buy') rows = rows.filter(t => t.qty > 0);
+  if (dir === 'sell') rows = rows.filter(t => t.qty < 0);
+
+  document.getElementById('hist-count').textContent = `${rows.length}건`;
+  document.getElementById('hist-body').innerHTML = rows.slice(0, 500).map(t => `
+    <tr style="cursor:pointer" onclick="state.selectedCode='${t.code}';switchTab('overview')">
+      <td>${t.date}</td>
+      <td><span style="font-weight:600">${escapeHtml((state.names[t.code] || t.code).slice(0, 18))}</span> <span class="text-faint" style="font-size:11px">${t.code}</span></td>
+      <td class="${t.qty > 0 ? 'gain' : 'loss'}">${t.qty > 0 ? '매수' : '매도'}</td>
+      <td>${signed(t.qty)}</td>
+      <td>${fmtNum(t.price)}</td>
+      <td>${fmtNum(t.fees)}</td>
+      <td>${fmtNum(t.settle)}</td>
+    </tr>
+  `).join('');
+  if (rows.length > 500) document.getElementById('hist-body').innerHTML += `<tr><td colspan="7" style="text-align:center;color:var(--text-faint);padding:14px">… 처음 500건만 표시 (전체 ${rows.length}건)</td></tr>`;
+}
+
+function renderSettings() {
+  const root = document.getElementById('tab-settings');
+  root.innerHTML = `
+    <div class="card">
+      <h2>Google Sheets 연결</h2>
+      <div class="field">
+        <label>Google OAuth Client ID</label>
+        <input type="text" id="set-client-id" value="${escapeAttr(state.clientId)}" placeholder="xxxxxxxxxxxx.apps.googleusercontent.com">
+      </div>
+      <div class="field">
+        <label>Spreadsheet ID</label>
+        <input type="text" id="set-sheet-id" value="${escapeAttr(state.sheetId)}" placeholder="1AbCdEf...">
+      </div>
+      <div class="field">
+        <label>초기 자본 (KRW)</label>
+        <input type="number" id="set-initial-cash" value="${state.initialCash || ''}" placeholder="예: 10000000">
+      </div>
+      <div style="display:flex;gap:8px;margin-top:12px">
+        <button class="icon-btn primary" onclick="saveSettings()">저장</button>
+        <button class="icon-btn" onclick="ensureTabs()">필수 탭 생성</button>
+      </div>
+      <div style="margin-top:14px;padding:10px;background:var(--bg);border-radius:6px;font-size:12px;color:var(--text-dim);line-height:1.7">
+        <div>📋 시트 탭 구성:</div>
+        <div>• <b>${TX_TAB}</b>: 매매일, 종목코드, 체결단가, 체결수량, 수수료, 정산금액</div>
+        <div>• <b>${NAMES_TAB}</b>: 종목코드, 종목명 (선택)</div>
+        <div>• <b>${CONFIG_TAB}</b>: A1=initial_cash, B1=금액 (선택)</div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:12px">
+      <h2>데이터</h2>
+      <div style="font-size:13px;color:var(--text-dim);line-height:1.8">
+        <div>거래내역: ${state.transactions.length}건</div>
+        <div>종목명 매핑: ${Object.keys(state.names).length}개</div>
+        <div>시세 캐시: ${Object.keys(state.prices).length}종목</div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+        <button class="icon-btn" onclick="refreshTransactions()">📥 거래내역 다시 로드</button>
+        <button class="icon-btn" onclick="refreshPrices()">💹 시세 다시 가져오기</button>
+        <button class="icon-btn" onclick="clearCache()">🗑️ 로컬 캐시 삭제</button>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:12px">
+      <h2>도움말</h2>
+      <div style="font-size:13px;color:var(--text-dim);line-height:1.8">
+        <div>• 시세 출처: 네이버 금융 (CORS 프록시 경유)</div>
+        <div>• 데이터 저장: Google Sheet (원본) + 로컬 캐시</div>
+        <div>• 손익 계산: FIFO 방식, 수수료(거래세 포함)는 정산금액에 이미 반영</div>
+        <div>• 종목코드는 'A' 접두사 포함 (예: A005930)</div>
+      </div>
+    </div>
+  `;
+}
+
+// ============ ACTIONS ============
+function saveSettings() {
+  state.clientId = document.getElementById('set-client-id').value.trim();
+  state.sheetId = document.getElementById('set-sheet-id').value.trim();
+  state.initialCash = Number(document.getElementById('set-initial-cash').value) || 0;
+  saveLocal();
+  initAuth();
+  toast('저장됨', 'success');
+}
+
+async function ensureTabs() {
+  if (!isAuthed()) { toast('먼저 로그인하세요', 'error'); return; }
+  for (const tab of [TX_TAB, NAMES_TAB, CONFIG_TAB, DAILY_TAB]) {
+    const ok = await sheetCreate(tab);
+    // ignore "already exists" failures
+  }
+  // Write headers
+  try {
+    await sheetAppend(`${TX_TAB}!A1`, [['매매일', '종목코드', '체결단가', '체결수량', '수수료', '정산금액']]);
+  } catch (e) {}
+  try {
+    await sheetAppend(`${NAMES_TAB}!A1`, [['종목코드', '종목명']]);
+  } catch (e) {}
+  toast('탭 확인 완료', 'success');
+}
+
+async function refreshTransactions() {
+  if (!isAuthed()) { handleAuth(); return; }
+  try {
+    toast('거래내역 로딩 중...');
+    state.transactions = await loadTransactions();
+    state.names = await loadNames();
+    const cfg = await loadConfig();
+    if (cfg.initial_cash) state.initialCash = Number(cfg.initial_cash) || state.initialCash;
+    saveLocal();
+    toast(`${state.transactions.length}건 로드됨`, 'success');
+    if (state.currentTab === 'overview') renderOverview();
+    if (state.currentTab === 'history') renderHistory();
+    if (state.currentTab === 'settings') renderSettings();
+  } catch (e) {
+    toast('로딩 실패: ' + e.message, 'error');
+  }
+}
+
+async function refreshPrices() {
+  const holds = computeHoldings(state.transactions);
+  const codes = Object.keys(holds).filter(c => holds[c].qty > 0);
+  if (!codes.length) { toast('보유 종목 없음'); return; }
+  toast(`시세 조회 중... (${codes.length}종목)`);
+  const { results, failed } = await fetchAllPrices(codes);
+  state.prices = { ...state.prices, ...results };
+  saveLocal();
+  if (failed.length) toast(`${Object.keys(results).length}종목 완료, ${failed.length}종목 실패`, 'error');
+  else toast(`${Object.keys(results).length}종목 시세 갱신`, 'success');
+  if (state.currentTab === 'overview') renderOverview();
+  if (state.currentTab === 'settings') renderSettings();
+}
+
+async function refreshAll() {
+  if (!isAuthed()) { handleAuth(); return; }
+  await refreshTransactions();
+  await refreshPrices();
+}
+
+function clearCache() {
+  if (!confirm('로컬 캐시를 모두 삭제하시겠습니까? (Sheet 데이터는 영향 없음)')) return;
+  localStorage.removeItem(STORAGE_KEY);
+  state.transactions = []; state.prices = {}; state.names = {};
+  state.accessToken = null; state.tokenExpiry = 0;
+  toast('캐시 삭제됨', 'success');
+  switchTab('settings');
+}
+
+// ============ HELPERS ============
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function escapeAttr(s) { return escapeHtml(s); }
+
+// ============ INIT ============
+loadLocal();
+window.addEventListener('load', () => {
+  switchTab('overview');
+  if (state.clientId) initAuth();
+  if (isAuthed()) {
+    document.getElementById('auth-btn').textContent = '✓ 로그인됨';
+    // Auto-refresh prices on load (transactions are cached)
+    if (state.transactions.length > 0) {
+      setTimeout(() => refreshPrices(), 500);
+    }
+  }
+});
+</script>
+
+</body>
+</html>
