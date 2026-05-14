@@ -129,13 +129,14 @@
   .holding-code { font-size: 11px; color: var(--text-faint); font-family: ui-monospace, monospace; }
 
   /* History table */
-  .history-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .history-table { width: 100%; border-collapse: collapse; font-size: 12px; }
   .history-table th, .history-table td {
-    padding: 10px 8px; text-align: right; border-bottom: 1px solid var(--border);
+    padding: 3px 8px; text-align: right; border-bottom: 1px solid var(--border);
     white-space: nowrap;
   }
   .history-table th {
-    color: var(--text-dim); font-weight: 500; font-size: 12px;
+    color: var(--text-dim); font-weight: 500; font-size: 11px;
+    padding: 6px 8px;
     background: var(--bg-elev); position: sticky; top: 0;
   }
   .history-table th:first-child, .history-table td:first-child { text-align: left; }
@@ -196,7 +197,23 @@
     .history-table { font-size: 12px; }
     .history-table th, .history-table td { padding: 8px 4px; }
   }
+  /* Chart controls (총자산 히스토리 차트 페이지) */
+  .chart-controls { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 12px; font-size: 12px; align-items: center; }
+  .chart-controls > div { display: flex; align-items: center; gap: 4px; }
+  .chart-controls .lbl { color: var(--text-dim); margin-right: 4px; }
+  .cbtn {
+    background: transparent; border: 1px solid var(--border);
+    color: var(--text-dim); cursor: pointer; padding: 4px 10px;
+    font-size: 11px; font-weight: 500; border-radius: 4px;
+    transition: all 0.15s;
+  }
+  .cbtn:hover { color: var(--text); border-color: var(--text-dim); }
+  .cbtn.on { background: var(--accent); color: white; border-color: var(--accent); }
+  .chart-bench-label { display: inline-flex; align-items: center; gap: 4px; color: var(--text-dim); cursor: pointer; user-select: none; }
+  .chart-bench-label input { margin: 0; cursor: pointer; }
+  .chart-canvas-wrap { background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0"></script>
 </head>
 <body>
 
@@ -274,8 +291,24 @@ let state = {
   lastPriceFetchAt: 0, // epoch ms of last successful price fetch
   activeBroker: '삼성국내',  // 'total' or one of BROKERS
   selectedCode: null,
+  showTotalChart: false,
+  chartPeriod: 'total',  // 'total' | '1y' | '6m' | '3m'
+  chartScale: 'log',     // 'log' | 'linear'
+  chartBenches: { '^KS11': true, '091160.KS': true, '^KQ11': true },  // KOSPI / KODEX반도체 / KOSDAQ
   currentTab: 'overview',
 };
+
+// Comparison index/ETF tickers for total value chart (Yahoo symbols)
+const BENCH_TICKERS = [
+  { code: '^KS11',     name: 'KOSPI',       color: '#3b82f6' },
+  { code: '091160.KS', name: 'KODEX반도체', color: '#a855f7' },
+  { code: '^KQ11',     name: 'KOSDAQ',      color: '#10b981' },
+];
+
+// In-memory caches for chart (not persisted)
+let _cachedDaily = null;
+let _cachedBench = {};   // code → { 'YYYY-MM-DD': close }
+let _chartInstance = null;
 
 function saveLocal() {
   const persist = {
@@ -941,6 +974,7 @@ function setActiveBroker(broker) {
 function renderOverview() {
   const root = document.getElementById('tab-overview');
   if (state.selectedCode) { renderTickerDetail(state.selectedCode); return; }
+  if (state.showTotalChart) { renderTotalChart(); return; }
 
   if (!state.transactions.length) {
     root.innerHTML = `<div class="empty"><div class="emoji">📊</div><div>거래내역이 없습니다.</div>
@@ -981,7 +1015,7 @@ function renderOverview() {
         <div class="value" style="white-space:nowrap">${fmtMan(sum.cash)}${changeBadge(sum.cashFlowToday)}</div>
         <div class="sub">${cashPct !== null ? `(총자산의 ${(cashPct * 100).toFixed(0)}%)` : ''}</div>
       </div>
-      <div class="card summary-card">
+      <div class="card summary-card" onclick="showTotalChart()" style="cursor:pointer" title="클릭하면 총자산 히스토리 차트">
         <div class="label">💰 총수익 ${earnPctTotal !== null ? `<span class="${plClass(earnPctTotal)}">(${fmtPct(earnPctTotal)})</span>` : ''}</div>
         <div class="row2">
           <div class="value ${plClass(sum.totalGain)}" style="white-space:nowrap">${fmtManSigned(sum.totalGain)}${changeBadge(sum.mvChange)}</div>
@@ -1072,6 +1106,234 @@ function pricesAsOfStr() {
 }
 
 function selectTicker(code) { state.selectedCode = code; renderOverview(); }
+
+// ============ TOTAL VALUE CHART ============
+function showTotalChart() {
+  state.showTotalChart = true;
+  saveLocal();
+  renderOverview();
+}
+function backFromChart() {
+  state.showTotalChart = false;
+  if (_chartInstance) { _chartInstance.destroy(); _chartInstance = null; }
+  saveLocal();
+  renderOverview();
+}
+function setChartPeriod(p) { state.chartPeriod = p; saveLocal(); drawTotalChart(); renderChartControls(); }
+function setChartScale(s) { state.chartScale = s; saveLocal(); drawTotalChart(); renderChartControls(); }
+function toggleBench(code, on) { state.chartBenches[code] = on; saveLocal(); drawTotalChart(); }
+
+function renderChartControls() {
+  const el = document.getElementById('chart-controls-host');
+  if (!el) return;
+  el.innerHTML = `
+    <div><span class="lbl">기간</span>
+      ${['total','1y','6m','3m'].map(p => `<button class="cbtn ${state.chartPeriod===p?'on':''}" onclick="setChartPeriod('${p}')">${p.toUpperCase()}</button>`).join('')}
+    </div>
+    <div><span class="lbl">스케일</span>
+      ${['log','linear'].map(s => `<button class="cbtn ${state.chartScale===s?'on':''}" onclick="setChartScale('${s}')">${s}</button>`).join('')}
+    </div>
+    <div><span class="lbl">비교</span>
+      ${BENCH_TICKERS.map(b => `<label class="chart-bench-label"><input type="checkbox" ${state.chartBenches[b.code]?'checked':''} onchange="toggleBench('${b.code}',this.checked)"><span style="color:${b.color}">${b.name}</span></label>`).join('')}
+    </div>
+  `;
+}
+
+async function renderTotalChart() {
+  const root = document.getElementById('tab-overview');
+  root.innerHTML = `
+    <button class="back-btn" onclick="backFromChart()">← 뒤로</button>
+    <h2 style="margin-top:0;margin-bottom:12px">📊 총자산 히스토리</h2>
+    <div id="chart-controls-host" class="chart-controls"></div>
+    <div class="chart-canvas-wrap">
+      <canvas id="chartCanvas" style="width:100%;height:420px"></canvas>
+    </div>
+    <div id="chartStatus" style="font-size:11px;color:var(--text-faint);text-align:center;padding:10px"></div>
+  `;
+  renderChartControls();
+  await drawTotalChart();
+}
+
+// Load daily_value_kr from Sheet (date, totalValue, cash, holdings, prices)
+async function loadDailyValues() {
+  try {
+    const rows = await sheetGet(`${DAILY_TAB}!A:E`);
+    if (!rows || rows.length < 2) return [];
+    const out = [];
+    for (let i = 1; i < rows.length; i++) {
+      const r = rows[i];
+      if (!r[0]) continue;
+      out.push({
+        date: parseDate(r[0]),
+        totalValue: parseNum(r[1]),
+        cash: parseNum(r[2]),
+      });
+    }
+    out.sort((a, b) => a.date < b.date ? -1 : 1);
+    return out;
+  } catch (e) {
+    return [];
+  }
+}
+
+// Fetch full historical daily closes for a Yahoo symbol (indices supported with ^ prefix).
+async function fetchYahooHist(symbol, range = '5y') {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=${range}`;
+  for (const proxy of CORS_PROXIES) {
+    try {
+      const r = await fetch(proxy + encodeURIComponent(url));
+      if (!r.ok) continue;
+      const data = await r.json();
+      const result = data.chart && data.chart.result && data.chart.result[0];
+      if (!result) continue;
+      const closes = result.indicators && result.indicators.quote && result.indicators.quote[0] && result.indicators.quote[0].close;
+      const ts = result.timestamp;
+      if (!closes || !ts) continue;
+      const out = {};
+      for (let i = 0; i < ts.length; i++) {
+        if (closes[i] == null) continue;
+        const d = new Date(ts[i] * 1000);
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        const dd = String(d.getDate()).padStart(2, '0');
+        out[`${d.getFullYear()}-${mm}-${dd}`] = closes[i];
+      }
+      return out;
+    } catch (e) {}
+  }
+  return {};
+}
+
+function periodCutoffDate(period) {
+  if (period === 'total') return '0000-00-00';
+  const now = new Date();
+  let d;
+  if (period === '1y') d = new Date(now.getFullYear()-1, now.getMonth(), now.getDate());
+  else if (period === '6m') d = new Date(now.getFullYear(), now.getMonth()-6, now.getDate());
+  else if (period === '3m') d = new Date(now.getFullYear(), now.getMonth()-3, now.getDate());
+  else return '0000-00-00';
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${mm}-${dd}`;
+}
+
+async function drawTotalChart() {
+  const status = document.getElementById('chartStatus');
+  if (!status) return;
+
+  // Load daily values (cache for session)
+  if (!_cachedDaily) {
+    status.textContent = 'daily_value_kr 데이터 로딩 중...';
+    _cachedDaily = await loadDailyValues();
+  }
+  if (!_cachedDaily.length) {
+    status.textContent = '⚠ daily_value_kr 데이터 없음. 설정 → "일별 가치 재계산" 먼저 실행하세요.';
+    return;
+  }
+
+  // Fetch benchmarks on demand
+  const enabledBenches = BENCH_TICKERS.filter(b => state.chartBenches[b.code]);
+  for (const b of enabledBenches) {
+    if (_cachedBench[b.code]) continue;
+    status.textContent = `${b.name} 시세 로딩...`;
+    _cachedBench[b.code] = await fetchYahooHist(b.code, '5y');
+  }
+
+  // Filter by period
+  const cutoff = periodCutoffDate(state.chartPeriod);
+  const series = _cachedDaily.filter(d => d.date >= cutoff);
+  if (!series.length) {
+    status.textContent = '선택한 기간에 데이터 없음.';
+    return;
+  }
+
+  // Normalize: base = first value of each series to 100
+  const labels = series.map(d => d.date);
+  const baseValue = series[0].totalValue || 1;
+  const portfolioData = series.map(d => d.totalValue / baseValue * 100);
+
+  const benchDatasets = [];
+  for (const b of enabledBenches) {
+    const hist = _cachedBench[b.code] || {};
+    const startDate = series[0].date;
+    // Find base price = first hist entry on or after startDate
+    const histDates = Object.keys(hist).filter(d => d >= startDate).sort();
+    if (!histDates.length) continue;
+    const benchBase = hist[histDates[0]];
+    // Forward-fill missing dates from previous available close
+    let lastVal = null;
+    const data = series.map(d => {
+      if (hist[d.date] != null) lastVal = hist[d.date];
+      return lastVal != null ? lastVal / benchBase * 100 : null;
+    });
+    benchDatasets.push({
+      label: b.name,
+      data,
+      borderColor: b.color,
+      backgroundColor: b.color,
+      borderWidth: 1.5,
+      tension: 0,
+      pointRadius: 0,
+      spanGaps: true,
+    });
+  }
+
+  // Draw
+  if (_chartInstance) { _chartInstance.destroy(); _chartInstance = null; }
+  const ctx = document.getElementById('chartCanvas').getContext('2d');
+  _chartInstance = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: '내 포트폴리오',
+          data: portfolioData,
+          borderColor: '#ef4444',
+          backgroundColor: '#ef4444',
+          borderWidth: 2.5,
+          tension: 0,
+          pointRadius: 0,
+        },
+        ...benchDatasets,
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { mode: 'index', intersect: false },
+      scales: {
+        x: {
+          type: 'category',
+          ticks: { color: '#888', maxTicksLimit: 8, font: { size: 10 } },
+          grid: { color: 'rgba(255,255,255,0.05)' },
+        },
+        y: {
+          type: state.chartScale === 'log' ? 'logarithmic' : 'linear',
+          ticks: { color: '#888', font: { size: 10 }, callback: v => v.toFixed(0) },
+          grid: { color: 'rgba(255,255,255,0.05)' },
+        },
+      },
+      plugins: {
+        legend: { position: 'top', labels: { color: '#ccc', font: { size: 11 }, boxWidth: 12, boxHeight: 12 } },
+        tooltip: {
+          mode: 'index', intersect: false,
+          callbacks: {
+            label: ctx => {
+              const v = ctx.parsed.y;
+              return `${ctx.dataset.label}: ${v != null ? v.toFixed(1) : '—'} (base=100)`;
+            },
+          },
+        },
+      },
+    },
+  });
+
+  const startD = series[0].date;
+  const endD = series[series.length-1].date;
+  const portfolioEnd = portfolioData[portfolioData.length-1];
+  status.textContent = `${series.length}일 · ${startD} → ${endD} · 포트폴리오 ${(portfolioEnd-100).toFixed(1)}% (base=100, ${state.chartScale} scale)`;
+}
 
 function renderTickerDetail(code) {
   const root = document.getElementById('tab-overview');
@@ -1222,7 +1484,7 @@ function applyHistoryFilter() {
     const sellAmt = sells.reduce((s, t) => s + t.settle, 0);
     const buyFees = buys.reduce((s, t) => s + t.fees, 0);
     const sellFees = sells.reduce((s, t) => s + t.fees, 0);
-    const net = sellAmt - buyAmt;   // positive = net cash in
+    const net = buyAmt - sellAmt;   // positive = net buy (red), negative = net sell (blue)
     html.push(`<tr class="day-summary">
       <td><b>${date}</b></td>
       <td colspan="6" style="font-size:11px">
@@ -1859,6 +2121,7 @@ async function refreshTransactions() {
   try {
     toast('거래내역 로딩 중...');
     state.transactions = await loadTransactions();
+    _cachedDaily = null;   // invalidate chart cache; will reload on next chart open
     state.names = await loadNames();
     const cfg = await loadConfig();
     // Per-broker initial cash from config_kr (with legacy fallback to flat initial_cash)
