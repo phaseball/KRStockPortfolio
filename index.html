@@ -523,6 +523,57 @@ async function fetchAllPrices(codes) {
   return { results, failed };
 }
 
+// Historical daily closes for one code over a date range (Naver chart API).
+// Returns: { "YYYY-MM-DD": closePrice, ... }
+async function fetchHistoricalPrices(code, fromDate, toDate) {
+  const numCode = stripA(code);
+  const start = fromDate.replace(/-/g, '') + '0000';
+  const end = toDate.replace(/-/g, '') + '2359';
+  const url = `https://api.stock.naver.com/chart/domestic/item/${numCode}/day?startDateTime=${start}&endDateTime=${end}`;
+  for (const proxy of CORS_PROXIES) {
+    try {
+      const fullUrl = proxy + encodeURIComponent(url);
+      const r = await fetch(fullUrl, { signal: AbortSignal.timeout(20000) });
+      if (!r.ok) continue;
+      const data = await r.json();
+      if (!Array.isArray(data)) continue;
+      const map = {};
+      for (const row of data) {
+        const dateRaw = row.localDate || row.localDateTime || row.tradeDate;
+        const close = row.closePrice ?? row.close;
+        if (dateRaw && close !== undefined && close !== null) {
+          const dStr = String(dateRaw).slice(0, 8);
+          if (/^\d{8}$/.test(dStr)) {
+            map[`${dStr.slice(0,4)}-${dStr.slice(4,6)}-${dStr.slice(6,8)}`] = Number(close);
+          }
+        }
+      }
+      if (Object.keys(map).length > 0) return map;
+    } catch (e) { /* try next proxy */ }
+  }
+  return {};
+}
+
+// Concurrency-limited parallel historical fetch
+async function fetchAllHistorical(codes, fromDate, toDate, onProgress) {
+  const result = {};
+  const failed = [];
+  const concurrency = 4;
+  let done = 0;
+  for (let i = 0; i < codes.length; i += concurrency) {
+    const batch = codes.slice(i, i + concurrency);
+    const histories = await Promise.all(batch.map(c => fetchHistoricalPrices(c, fromDate, toDate)));
+    batch.forEach((c, idx) => {
+      const h = histories[idx];
+      if (Object.keys(h).length > 0) result[c] = h;
+      else failed.push(c);
+    });
+    done += batch.length;
+    if (onProgress) onProgress(done, codes.length);
+  }
+  return { result, failed };
+}
+
 // ============ ANALYTICS ============
 // Moving-average cost basis (matches StockPortfolio v4):
 //   Buy:  newAvgCost = (avgCost * qty + tx.qty * tx.price) / (qty + tx.qty)   [gross price, no fees]
@@ -902,6 +953,15 @@ function renderSettings() {
     </div>
 
     <div class="card" style="margin-top:12px">
+      <h2>일별 가치 (daily_value)</h2>
+      <div style="font-size:12px;color:var(--text-dim);line-height:1.7;margin-bottom:10px">
+        <code>${DAILY_TAB}</code> 탭에 일별 스냅샷을 저장합니다. 컬럼: <code>date · totalValue · cash · holdings · prices</code> (v4와 동일).
+        모든 보유 종목의 일별 종가를 네이버에서 가져와 총자산을 계산합니다.
+      </div>
+      <button class="icon-btn primary" onclick="recalcDailyValues()">📊 daily_value 재계산</button>
+    </div>
+
+    <div class="card" style="margin-top:12px">
       <h2>도움말</h2>
       <div style="font-size:13px;color:var(--text-dim);line-height:1.8">
         <div>• 인증: Service Account (JWT 자동 갱신)</div>
@@ -978,6 +1038,134 @@ async function ensureTabs() {
     toast('탭 확인/생성 완료', 'success');
   } catch (e) {
     toast('실패: ' + e.message, 'error');
+  }
+}
+
+// Recompute daily_value_kr from scratch.
+// Schema: date | totalValue | cash | holdings | prices  (matches v4)
+async function recalcDailyValues() {
+  if (!isConfigured()) { toast('연결 설정 먼저', 'error'); return; }
+  if (!state.transactions.length) { toast('거래내역 없음 — 먼저 새로고침', 'error'); return; }
+  if (!confirm(`daily_value_kr 탭을 전체 재계산합니다.\n시세 API 호출에 ~30초~2분 소요. 계속?`)) return;
+
+  try {
+    // Sort with buys-first within same date (matches computeHoldings ordering)
+    const sorted = [...state.transactions].sort((a, b) => {
+      if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+      const aIsBuy = a.qty > 0 ? 0 : 1;
+      const bIsBuy = b.qty > 0 ? 0 : 1;
+      if (aIsBuy !== bIsBuy) return aIsBuy - bIsBuy;
+      return a.seq - b.seq;
+    });
+
+    const fromDate = sorted[0].date;
+    const today = new Date().toISOString().slice(0, 10);
+
+    // Codes ever held with positive qty
+    const everHeld = new Set();
+    {
+      const pos = {};
+      for (const tx of sorted) {
+        pos[tx.code] = (pos[tx.code] || 0) + tx.qty;
+        if (pos[tx.code] > 0) everHeld.add(tx.code);
+      }
+    }
+    const codes = [...everHeld];
+
+    // Fetch historical prices in parallel
+    toast(`시세 가져오는 중... 0/${codes.length}`);
+    const { result: priceHistory, failed } = await fetchAllHistorical(
+      codes, fromDate, today,
+      (done, total) => { toast(`시세 가져오는 중... ${done}/${total}`); }
+    );
+
+    // Collect all dates (price dates ∪ tx dates)
+    const allDates = new Set();
+    for (const c in priceHistory) for (const d in priceHistory[c]) allDates.add(d);
+    for (const tx of sorted) allDates.add(tx.date);
+    const sortedDates = [...allDates].sort();
+    if (!sortedDates.length) { toast('시세 데이터 없음', 'error'); return; }
+
+    // Group transactions by date
+    const txByDate = {};
+    for (const tx of sorted) {
+      if (!txByDate[tx.date]) txByDate[tx.date] = [];
+      txByDate[tx.date].push(tx);
+    }
+    const txDatesSorted = Object.keys(txByDate).sort();
+
+    // Walk through dates, build snapshots
+    toast(`스냅샷 계산 중 (${sortedDates.length}일)...`);
+    const out = [['date', 'totalValue', 'cash', 'holdings', 'prices']];
+    let cash = state.initialCash;
+    const positions = {};
+    const lastKnown = {};  // forward-fill last observed price per code
+    let txIdx = 0;
+
+    for (const date of sortedDates) {
+      // Apply all txs with date <= snapshot date
+      while (txIdx < txDatesSorted.length && txDatesSorted[txIdx] <= date) {
+        for (const tx of txByDate[txDatesSorted[txIdx]]) {
+          positions[tx.code] = (positions[tx.code] || 0) + tx.qty;
+          if (positions[tx.code] <= 0) positions[tx.code] = 0;
+          if (tx.qty > 0) cash -= tx.settle;
+          else cash += tx.settle;
+        }
+        txIdx++;
+      }
+
+      // EOD snapshot
+      const holdings = {};
+      const prices = {};
+      let marketValue = 0;
+      for (const code in positions) {
+        if (positions[code] <= 0) continue;
+        let p = priceHistory[code]?.[date];
+        if (p) lastKnown[code] = p;
+        else p = lastKnown[code];
+        if (p) {
+          prices[code] = p;
+          const v = positions[code] * p;
+          holdings[code] = Math.round(v);
+          marketValue += v;
+        }
+      }
+
+      out.push([
+        date,
+        Math.round(cash + marketValue),
+        Math.round(cash),
+        JSON.stringify(holdings),
+        JSON.stringify(prices),
+      ]);
+    }
+
+    // Write to Sheet (clear + put)
+    toast(`${out.length - 1}일 시트에 저장 중...`);
+    const token = await getAccessToken();
+    try { await sheetCreate(DAILY_TAB); } catch (e) {}
+    await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${state.sheetId}/values/${encodeURIComponent(DAILY_TAB)}!A:E:clear`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    const writeResp = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${state.sheetId}/values/${encodeURIComponent(DAILY_TAB)}!A1?valueInputOption=USER_ENTERED`, {
+      method: 'PUT',
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ range: `${DAILY_TAB}!A1`, values: out }),
+    });
+    if (!writeResp.ok) {
+      const t = await writeResp.text().catch(() => '');
+      throw new Error(`Sheet write ${writeResp.status}: ${t.slice(0, 200)}`);
+    }
+
+    const last = out[out.length - 1];
+    const failedNote = failed.length ? ` (시세 실패 ${failed.length}종목)` : '';
+    toast(`✓ ${out.length - 1}일 저장. 최종 총자산 ${fmtKRW(last[1])}${failedNote}`, 'success');
+    if (failed.length) console.warn('Codes without price history:', failed);
+  } catch (e) {
+    toast('실패: ' + e.message, 'error');
+    console.error(e);
   }
 }
 
