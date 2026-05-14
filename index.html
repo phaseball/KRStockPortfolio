@@ -388,7 +388,15 @@ async function loadTransactions() {
       seq: i,
     });
   }
-  out.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : a.seq - b.seq);
+  // Sort: date asc, then BUYS BEFORE SELLS on the same day (handles intraday
+  // day-trades where PDF order isn't strictly chronological), then sheet row order.
+  out.sort((a, b) => {
+    if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+    const aIsBuy = a.qty > 0 ? 0 : 1;
+    const bIsBuy = b.qty > 0 ? 0 : 1;
+    if (aIsBuy !== bIsBuy) return aIsBuy - bIsBuy;
+    return a.seq - b.seq;
+  });
   return out;
 }
 
