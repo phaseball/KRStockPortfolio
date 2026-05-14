@@ -86,6 +86,7 @@
   .summary-card .pair { display: flex; gap: 14px; align-items: baseline; margin-top: 6px; flex-wrap: wrap; }
   .summary-card .pair .item .lbl { font-size: 11px; color: var(--text-dim); }
   .summary-card .pair .item .v { font-size: 16px; font-weight: 700; white-space: nowrap; }
+  .change-badge { font-size: 11px; font-weight: 500; margin-left: 6px; vertical-align: baseline; }
 
   /* Broker switcher (4 sub-tabs in 개요) */
   .broker-tabs { display: flex; gap: 2px; margin-bottom: 14px; border-bottom: 1px solid var(--border); }
@@ -361,6 +362,20 @@ function fmtPct(n) {
   if (n === null || n === undefined || isNaN(n)) return '—';
   const s = (n * 100).toFixed(2) + '%';
   return n > 0 ? '+' + s : s;
+}
+// Local-time today in YYYY-MM-DD (Korea timezone for KR users)
+function todayKR() {
+  const d = new Date();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${mm}-${dd}`;
+}
+// "▲5.2만" (gain, red) or "▼3.1만" (loss, blue) inline badge for today's change.
+// Returns '' if value is near-zero (under 100원).
+function changeBadge(n) {
+  if (n == null || isNaN(n) || Math.abs(n) < 100) return '';
+  const tri = n > 0 ? '▲' : '▼';
+  return ` <span class="change-badge ${plClass(n)}">${tri}${fmtMan(Math.abs(n))}</span>`;
 }
 // "(d% / 1w%)" — colored, in parens; returns '' if no data
 function fmtChangePcts(priceObj) {
@@ -822,22 +837,34 @@ async function fetchAllHistorical(codes, fromDate, toDate, onProgress) {
 function computeHoldings(txs) {
   const holds = {};
   const curYear = new Date().getFullYear().toString();
+  const today = todayKR();
   for (const tx of txs) {
     if (!tx.code) continue;
-    if (!holds[tx.code]) holds[tx.code] = { qty: 0, avgCost: 0, realizedPL: 0, realizedPLThisYear: 0, buyCount: 0, sellCount: 0 };
+    if (!holds[tx.code]) holds[tx.code] = {
+      qty: 0, avgCost: 0,
+      realizedPL: 0, realizedPLThisYear: 0, realizedPLToday: 0,
+      cashFlowToday: 0,
+      buyCount: 0, sellCount: 0,
+    };
     const h = holds[tx.code];
+    const isToday = tx.date === today;
     if (tx.qty > 0) {
       // Buy: update moving average using gross price (fees NOT added to cost basis)
       const newCost = h.avgCost * h.qty + tx.qty * tx.price;
       h.qty += tx.qty;
       h.avgCost = h.qty > 0 ? newCost / h.qty : 0;
       h.buyCount++;
+      if (isToday) h.cashFlowToday -= tx.settle;
     } else if (tx.qty < 0) {
       // Sell: realized PL using moving-avg basis, fees deducted
       const sellQty = -tx.qty;
       const pl = sellQty * (tx.price - h.avgCost) - tx.fees;
       h.realizedPL += pl;
       if (tx.date.startsWith(curYear)) h.realizedPLThisYear += pl;
+      if (isToday) {
+        h.realizedPLToday += pl;
+        h.cashFlowToday += tx.settle;
+      }
       h.qty -= sellQty;
       h.sellCount++;
       if (h.qty <= 0) { h.qty = 0; h.avgCost = 0; }
@@ -856,20 +883,29 @@ function computeSummary(txs, holds, prices, initialCash) {
   }
   const cash = initialCash - buyTotal + sellTotal;
 
-  // Holdings sums
+  // Holdings sums (+ today's deltas, + mvChange from price moves)
   let marketValue = 0, unrealizedPL = 0, costBasis = 0, realizedPL = 0, realizedPLYTD = 0;
+  let realizedPLToday = 0, cashFlowToday = 0, mvChange = 0;
   for (const code of Object.keys(holds)) {
     const h = holds[code];
     realizedPL += h.realizedPL;
     realizedPLYTD += h.realizedPLThisYear;
+    realizedPLToday += h.realizedPLToday || 0;
+    cashFlowToday += h.cashFlowToday || 0;
     if (h.qty > 0) {
       const lineCost = h.qty * h.avgCost;
       costBasis += lineCost;
-      const p = prices[code] ? prices[code].price : null;
+      const pObj = prices[code];
+      const p = pObj ? pObj.price : null;
       if (p) {
         const mv = h.qty * p;
         marketValue += mv;
         unrealizedPL += mv - lineCost;
+        // Today's market value change from price move (yesterday's close → now)
+        if (pObj.changeRate != null && !isNaN(pObj.changeRate)) {
+          const prevClose = p / (1 + pObj.changeRate);
+          mvChange += h.qty * (p - prevClose);
+        }
       } else {
         marketValue += lineCost;  // fallback when no price available
       }
@@ -877,7 +913,11 @@ function computeSummary(txs, holds, prices, initialCash) {
   }
   const totalAsset = cash + marketValue;
   const totalGain = totalAsset - initialCash;
-  return { cash, marketValue, unrealizedPL, costBasis, realizedPL, realizedPLYTD, totalAsset, totalGain, buyTotal, sellTotal, feesTotal, initialCash };
+  return {
+    cash, marketValue, unrealizedPL, costBasis, realizedPL, realizedPLYTD,
+    realizedPLToday, cashFlowToday, mvChange,
+    totalAsset, totalGain, buyTotal, sellTotal, feesTotal, initialCash,
+  };
 }
 
 // ============ RENDERING ============
@@ -932,27 +972,27 @@ function renderOverview() {
       <div class="card summary-card">
         <div class="label">📈 평가손익 ${uplPctTotal !== null ? `<span class="${plClass(uplPctTotal)}">(${fmtPct(uplPctTotal)})</span>` : ''}</div>
         <div class="row2">
-          <div class="value ${plClass(sum.unrealizedPL)}" style="white-space:nowrap">${fmtManSigned(sum.unrealizedPL)}</div>
+          <div class="value ${plClass(sum.unrealizedPL)}" style="white-space:nowrap">${fmtManSigned(sum.unrealizedPL)}${changeBadge(sum.mvChange)}</div>
           <div class="meta">평가&nbsp;${fmtMan(sum.marketValue)}<br>매수&nbsp;${fmtMan(sum.costBasis)}</div>
         </div>
       </div>
       <div class="card summary-card">
         <div class="label">💵 현금</div>
-        <div class="value">${fmtMan(sum.cash)}</div>
+        <div class="value" style="white-space:nowrap">${fmtMan(sum.cash)}${changeBadge(sum.cashFlowToday)}</div>
         <div class="sub">${cashPct !== null ? `(총자산의 ${(cashPct * 100).toFixed(0)}%)` : ''}</div>
       </div>
       <div class="card summary-card">
         <div class="label">💰 총수익 ${earnPctTotal !== null ? `<span class="${plClass(earnPctTotal)}">(${fmtPct(earnPctTotal)})</span>` : ''}</div>
         <div class="row2">
-          <div class="value ${plClass(sum.totalGain)}" style="white-space:nowrap">${fmtManSigned(sum.totalGain)}</div>
+          <div class="value ${plClass(sum.totalGain)}" style="white-space:nowrap">${fmtManSigned(sum.totalGain)}${changeBadge(sum.mvChange)}</div>
           <div class="meta">자산&nbsp;${fmtMan(sum.totalAsset)}<br>초기&nbsp;${fmtMan(sum.initialCash)}</div>
         </div>
       </div>
       <div class="card summary-card">
-        <div class="label">📊 실현손익</div>
-        <div class="pair">
-          <div class="item"><div class="lbl">YTD</div><div class="v ${plClass(sum.realizedPLYTD)}">${fmtManSigned(sum.realizedPLYTD)}</div></div>
-          <div class="item"><div class="lbl">total</div><div class="v ${plClass(sum.realizedPL)}">${fmtManSigned(sum.realizedPL)}</div></div>
+        <div class="label">📊 실현손익 YTD</div>
+        <div class="row2">
+          <div class="value ${plClass(sum.realizedPLYTD)}" style="white-space:nowrap">${fmtManSigned(sum.realizedPLYTD)}${changeBadge(sum.realizedPLToday)}</div>
+          <div class="meta">total&nbsp;${fmtManSigned(sum.realizedPL)}</div>
         </div>
       </div>
     </div>
@@ -1413,12 +1453,24 @@ async function commitInput() {
   if (!isConfigured()) { toast('연결 설정 먼저', 'error'); return; }
   if (!lastParsedInput.rows.length) { toast('미리보기 먼저 실행', 'error'); return; }
 
-  // Group by broker (row[0]); values to write are columns A..G (date..split)
+  // Group by broker (row[0]); convert numeric columns to comma-formatted strings.
+  // USER_ENTERED parses "174,520" back to number 174520 AND applies matching number format,
+  // so the Sheet displays the comma. parseNum on read strips commas correctly.
+  const fmtNum = (v) => Number(v).toLocaleString('en-US');
   const byBroker = {};
   for (const r of lastParsedInput.rows) {
     const broker = r[0];
     if (!byBroker[broker]) byBroker[broker] = [];
-    byBroker[broker].push(r.slice(1));   // [date, code, price, qty, fees, settle, split]
+    // r = [broker, date, code, price, qty, fees, settle, split]
+    byBroker[broker].push([
+      r[1],            // date
+      r[2],            // code
+      fmtNum(r[3]),    // price (with commas)
+      Number(r[4]).toString(),  // qty (signed, no commas)
+      fmtNum(r[5]),    // fees (with commas)
+      fmtNum(r[6]),    // settle (with commas)
+      r[7] || '',      // split
+    ]);
   }
   const summary = Object.entries(byBroker).map(([b, rs]) => `${b}: ${rs.length}건`).join(', ');
   if (!confirm(`${lastParsedInput.rows.length}건을 시트에 추가:\n${summary}\n\n계속?`)) return;
