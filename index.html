@@ -15,8 +15,8 @@
     --text-dim: #9aa0a6;
     --text-faint: #5f6368;
     --accent: #4f9cf9;
-    --gain: #00e676;
-    --loss: #ff5252;
+    --gain: #ef4444;
+    --loss: #3b82f6;
     --warn: #ffb74d;
     --shadow: 0 4px 16px rgba(0,0,0,0.4);
   }
@@ -172,12 +172,14 @@
 <div class="nav">
   <button class="nav-btn active" data-tab="overview" onclick="switchTab('overview')">📊 개요</button>
   <button class="nav-btn" data-tab="history" onclick="switchTab('history')">📜 거래내역</button>
+  <button class="nav-btn" data-tab="input" onclick="switchTab('input')">📝 입력</button>
   <button class="nav-btn" data-tab="settings" onclick="switchTab('settings')">⚙️ 설정</button>
 </div>
 
 <div class="container">
   <div id="tab-overview" class="tab-content"></div>
   <div id="tab-history" class="tab-content" style="display:none"></div>
+  <div id="tab-input" class="tab-content" style="display:none"></div>
   <div id="tab-settings" class="tab-content" style="display:none"></div>
 </div>
 
@@ -238,28 +240,38 @@ function loadLocal() {
 }
 
 // ============ UTILS ============
-// 만(萬, 10,000) unit formatter — Korean readability.
-// Decimals scale with magnitude: ≥1000만 → no decimal, ≥10만 → 1 decimal, <10만 → 2 decimals.
+// All numeric output: 만(萬, 10,000) unit, NO thousand-separator commas.
+// Adaptive variant: magnitude-scaled decimals + "만" suffix (totals, P/L).
 function fmtMan(n) {
   if (n === null || n === undefined || isNaN(n)) return '—';
   const man = n / 10000;
   const abs = Math.abs(man);
   const sign = man < 0 ? '-' : '';
   let s;
-  if (abs >= 1000) s = Math.round(abs).toLocaleString('ko-KR');
+  if (abs >= 1000) s = Math.round(abs).toString();
   else if (abs >= 10) s = abs.toFixed(1);
   else s = abs.toFixed(2);
   return sign + s + '만';
 }
-// Variant with explicit + sign for positives (P/L)
+// + sign for positives (used for P/L). Same body as fmtMan with leading '+'.
 function fmtManSigned(n) {
   if (n === null || n === undefined || isNaN(n)) return '—';
   if (n > 0) return '+' + fmtMan(n);
   return fmtMan(n);
 }
+// Fixed 2 decimals, no '만' suffix — for prices (평단/현재가/단가) and 정산금액
+function fmtMan2(n) {
+  if (n === null || n === undefined || isNaN(n)) return '—';
+  return (n / 10000).toFixed(2);
+}
+// Fixed 3 decimals, no '만' suffix — for 수수료
+function fmtMan3(n) {
+  if (n === null || n === undefined || isNaN(n)) return '—';
+  return (n / 10000).toFixed(3);
+}
 function fmtNum(n) {
   if (n === null || n === undefined || isNaN(n)) return '—';
-  return Math.round(n).toLocaleString('ko-KR');
+  return Math.round(n).toString();
 }
 function fmtPct(n) {
   if (n === null || n === undefined || isNaN(n)) return '—';
@@ -271,8 +283,8 @@ function plClass(n) {
   return n > 0 ? 'gain' : 'loss';
 }
 function signed(n) {
-  if (n > 0) return '+' + n.toLocaleString('ko-KR');
-  return n.toLocaleString('ko-KR');
+  if (n > 0) return '+' + n.toString();
+  return n.toString();
 }
 
 function toast(msg, type = '') {
@@ -498,7 +510,7 @@ async function fetchYahooPrice(code) {
   const suffixes = ['.KS', '.KQ'];
   for (const sfx of suffixes) {
     const symbol = numCode + sfx;
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=5d`;
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1mo`;
     for (const proxy of CORS_PROXIES) {
       try {
         const r = await fetch(proxy + encodeURIComponent(url), { signal: AbortSignal.timeout(10000) });
@@ -509,10 +521,24 @@ async function fetchYahooPrice(code) {
         const meta = result.meta;
         const price = meta?.regularMarketPrice;
         const prevClose = meta?.chartPreviousClose ?? meta?.previousClose;
-        if (price) {
-          const changeRate = prevClose ? (price - prevClose) / prevClose : null;
-          return { price: Number(price), changeRate, asOf: new Date().toISOString().slice(0, 10), market: sfx };
+        if (!price) continue;
+
+        // Build daily-close series in chronological order (filter nulls)
+        const ts = result.timestamp || [];
+        const rawCloses = result.indicators?.quote?.[0]?.close || [];
+        const series = [];
+        for (let i = 0; i < ts.length; i++) {
+          if (rawCloses[i] != null) series.push({ ts: ts[i], close: Number(rawCloses[i]) });
         }
+        // Excluded today's bar (compare price vs strictly prior closes)
+        const todayISO = new Date().toISOString().slice(0, 10);
+        const past = series.filter(s => new Date(s.ts * 1000).toISOString().slice(0, 10) < todayISO);
+        const yesterdayClose = past.length > 0 ? past[past.length - 1].close : (prevClose ?? null);
+        const week1Close = past.length >= 5 ? past[past.length - 5].close : null;
+        const changeRate = yesterdayClose ? (price - yesterdayClose) / yesterdayClose : null;
+        const week1Rate = week1Close ? (price - week1Close) / week1Close : null;
+
+        return { price: Number(price), changeRate, week1Rate, asOf: new Date().toISOString().slice(0, 10), market: sfx };
       } catch (e) { /* try next proxy/suffix */ }
     }
   }
@@ -664,6 +690,7 @@ function switchTab(name) {
   document.getElementById('tab-' + name).style.display = 'block';
   if (name === 'overview') renderOverview();
   else if (name === 'history') renderHistory();
+  else if (name === 'input') renderInput();
   else if (name === 'settings') renderSettings();
 }
 
@@ -729,7 +756,7 @@ function renderOverview() {
             <div>
               <div class="holding-name">${escapeHtml(name)}</div>
               <div class="holding-code">${code}</div>
-              <div class="holding-meta">${h.qty.toLocaleString()}주 · 평단 ${fmtMan(h.avgCost)} · 현재가 ${curPrice ? fmtMan(curPrice) : '—'}</div>
+              <div class="holding-meta">${h.qty.toString()}주 · 평단 ${fmtMan2(h.avgCost)} · 현재가 ${curPrice ? fmtMan2(curPrice) : '—'}${priceObj && priceObj.changeRate !== null && priceObj.changeRate !== undefined ? ` <span class="${plClass(priceObj.changeRate)}">${fmtPct(priceObj.changeRate)}</span>` : ''}${priceObj && priceObj.week1Rate !== null && priceObj.week1Rate !== undefined ? ` <span class="text-faint">/</span> <span class="${plClass(priceObj.week1Rate)}">${fmtPct(priceObj.week1Rate)}<span class="text-faint">·1w</span></span>` : ''}</div>
             </div>
             <div class="holding-value">
               <div class="price">${value !== null ? fmtMan(value) : fmtMan(lineCost) + ' (취득가)'}</div>
@@ -773,8 +800,8 @@ function renderTickerDetail(code) {
 
   const summary = `
     <div class="cards-grid">
-      <div class="card summary-card"><div class="label">보유수량</div><div class="value">${h.qty.toLocaleString()}주</div><div class="sub">평단 ${fmtMan(h.avgCost)}</div></div>
-      <div class="card summary-card"><div class="label">현재가</div><div class="value">${curPrice ? fmtMan(curPrice) : '—'}</div><div class="sub">${priceObj && priceObj.changeRate !== null ? fmtPct(priceObj.changeRate) : ''}</div></div>
+      <div class="card summary-card"><div class="label">보유수량</div><div class="value">${h.qty.toString()}주</div><div class="sub">평단 ${fmtMan2(h.avgCost)}</div></div>
+      <div class="card summary-card"><div class="label">현재가</div><div class="value">${curPrice ? fmtMan2(curPrice) : '—'}</div><div class="sub">${priceObj && priceObj.changeRate !== null && priceObj.changeRate !== undefined ? `<span class="${plClass(priceObj.changeRate)}">${fmtPct(priceObj.changeRate)}</span>` : ''}${priceObj && priceObj.week1Rate !== null && priceObj.week1Rate !== undefined ? ` <span class="text-faint">/</span> <span class="${plClass(priceObj.week1Rate)}">${fmtPct(priceObj.week1Rate)}·1w</span>` : ''}</div></div>
       <div class="card summary-card"><div class="label">평가손익</div><div class="value ${plClass(upl)}">${fmtManSigned(upl)}</div><div class="sub ${plClass(uplPct)}">${fmtPct(uplPct)}</div></div>
       <div class="card summary-card"><div class="label">실현손익</div><div class="value ${plClass(h.realizedPL)}">${fmtManSigned(h.realizedPL)}</div></div>
     </div>
@@ -800,16 +827,16 @@ function renderTickerDetail(code) {
   const rows = [...walked].reverse().map(t => {
     const splitBadge = t.splitRaw ? ` <span style="color:var(--warn);font-size:10px">[split ${escapeHtml(t.splitRaw)}]</span>` : '';
     const qtyCell = t.splitRaw ? `${signed(t.qty)}<br><span class="text-faint" style="font-size:10px">(원본 ${signed(t.origQty)})</span>` : signed(t.qty);
-    const priceCell = t.splitRaw ? `${fmtMan(t.price)}<br><span class="text-faint" style="font-size:10px">(원본 ${fmtMan(t.origPrice)})</span>` : fmtMan(t.price);
+    const priceCell = t.splitRaw ? `${fmtMan2(t.price)}<br><span class="text-faint" style="font-size:10px">(원본 ${fmtMan2(t.origPrice)})</span>` : fmtMan2(t.price);
     return `
     <tr>
       <td>${t.date}${splitBadge}</td>
       <td class="${t.qty > 0 ? 'gain' : 'loss'}">${t.qty > 0 ? '매수' : '매도'}</td>
       <td>${qtyCell}</td>
       <td>${priceCell}</td>
-      <td>${fmtMan(t.fees)}</td>
-      <td>${fmtMan(t.settle)}</td>
-      <td><b>${t.runningQty.toLocaleString()}</b></td>
+      <td>${fmtMan3(t.fees)}</td>
+      <td>${fmtMan2(t.settle)}</td>
+      <td><b>${t.runningQty.toString()}</b></td>
     </tr>
   `;
   }).join('');
@@ -898,12 +925,158 @@ function applyHistoryFilter() {
       <td><span style="font-weight:600">${escapeHtml((state.names[t.code] || t.code).slice(0, 18))}</span> <span class="text-faint" style="font-size:11px">${t.code}</span></td>
       <td class="${t.qty > 0 ? 'gain' : 'loss'}">${t.qty > 0 ? '매수' : '매도'}</td>
       <td>${signed(t.qty)}</td>
-      <td>${fmtMan(t.price)}</td>
-      <td>${fmtMan(t.fees)}</td>
-      <td>${fmtMan(t.settle)}</td>
+      <td>${fmtMan2(t.price)}</td>
+      <td>${fmtMan3(t.fees)}</td>
+      <td>${fmtMan2(t.settle)}</td>
     </tr>
   `).join('');
   if (rows.length > 500) document.getElementById('hist-body').innerHTML += `<tr><td colspan="7" style="text-align:center;color:var(--text-faint);padding:14px">… 처음 500건만 표시 (전체 ${rows.length}건)</td></tr>`;
+}
+
+// ============ INPUT (Sheet Append) ============
+// Paste new transactions and append to the Sheet.
+// Supported delimiters: tab, comma, or 2+ spaces. Columns expected (in order):
+//   date · code · price · qty(signed) · fees · settle · [split optional]
+function parseInputRows(text) {
+  const rows = [];
+  const errors = [];
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  lines.forEach((line, idx) => {
+    if (line.startsWith('#') || line.startsWith('//')) return;  // comments
+    // Auto-detect delimiter
+    let parts;
+    if (line.includes('\t')) parts = line.split('\t');
+    else if (line.includes(',')) parts = line.split(',');
+    else parts = line.split(/\s{2,}/);
+    parts = parts.map(p => p.trim());
+    if (parts.length < 6) {
+      errors.push(`${idx + 1}행: 컬럼 부족 (${parts.length}개, 최소 6개 필요)`);
+      return;
+    }
+    // Skip header rows
+    if (/매매일|date/i.test(parts[0]) && /종목|code/i.test(parts[1])) return;
+
+    const [dateRaw, codeRaw, priceRaw, qtyRaw, feesRaw, settleRaw, splitRaw] = parts;
+    const date = parseDate(dateRaw);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      errors.push(`${idx + 1}행: 날짜 형식 오류 "${dateRaw}"`);
+      return;
+    }
+    let code = String(codeRaw).trim().toUpperCase();
+    if (/^\d{6}$/.test(code)) code = 'A' + code;  // pad missing A prefix
+    if (!/^A[\dA-Z]{6}$/.test(code)) {
+      errors.push(`${idx + 1}행: 종목코드 형식 오류 "${codeRaw}"`);
+      return;
+    }
+    const price = parseNum(priceRaw);
+    const qty = parseNum(qtyRaw);
+    const fees = parseNum(feesRaw);
+    const settle = parseNum(settleRaw);
+    if (!price || !qty) {
+      errors.push(`${idx + 1}행: 가격/수량이 0 또는 누락 "${priceRaw}/${qtyRaw}"`);
+      return;
+    }
+    rows.push([date, code, price, qty, fees, settle, splitRaw || '']);
+  });
+  return { rows, errors };
+}
+
+let lastParsedInput = { rows: [], errors: [] };
+
+function renderInput() {
+  const root = document.getElementById('tab-input');
+  const parsed = lastParsedInput;
+  const previewHtml = parsed.rows.length === 0
+    ? `<div class="empty" style="padding:18px"><div style="font-size:12px;color:var(--text-faint)">위 textarea에 데이터를 붙여넣고 "미리보기"를 누르세요</div></div>`
+    : `<div style="overflow-x:auto"><table>
+        <thead><tr><th>매매일</th><th>종목코드</th><th>종목명</th><th>단가</th><th>수량</th><th>수수료</th><th>정산금액</th><th>split</th></tr></thead>
+        <tbody>${parsed.rows.map(r => `<tr>
+          <td>${r[0]}</td>
+          <td>${r[1]}</td>
+          <td><span class="text-faint">${escapeHtml(state.names[r[1]] || '—')}</span></td>
+          <td>${fmtMan2(r[2])}</td>
+          <td class="${r[3] > 0 ? 'gain' : 'loss'}">${signed(r[3])}</td>
+          <td>${fmtMan3(r[4])}</td>
+          <td>${fmtMan2(r[5])}</td>
+          <td>${escapeHtml(r[6] || '')}</td>
+        </tr>`).join('')}</tbody></table></div>`;
+
+  const errorsHtml = parsed.errors.length === 0 ? '' :
+    `<div class="card" style="margin-top:10px;border-color:var(--loss)">
+      <div style="font-weight:600;color:var(--loss);margin-bottom:6px">⚠️ ${parsed.errors.length}개 행에 오류</div>
+      <div style="font-size:12px;color:var(--text-dim);line-height:1.7;font-family:ui-monospace,monospace">
+        ${parsed.errors.slice(0, 20).map(e => `<div>• ${escapeHtml(e)}</div>`).join('')}
+        ${parsed.errors.length > 20 ? `<div class="text-faint">… ${parsed.errors.length - 20}개 더</div>` : ''}
+      </div>
+    </div>`;
+
+  root.innerHTML = `
+    <div class="card">
+      <h2>📝 신규 거래내역 입력</h2>
+      <div style="font-size:12px;color:var(--text-dim);line-height:1.7;margin-bottom:10px">
+        새 거래내역을 붙여넣으면 <code>${TX_TAB}</code> 시트에 append합니다.
+        <br>형식: 탭 / 콤마 / 다중공백 구분, 6~7 컬럼.
+      </div>
+      <div style="background:var(--bg);padding:10px;border-radius:6px;font-size:11px;color:var(--text-dim);font-family:ui-monospace,monospace;line-height:1.6;margin-bottom:10px">
+        매매일&nbsp;&nbsp;종목코드&nbsp;&nbsp;체결단가&nbsp;&nbsp;체결수량&nbsp;&nbsp;수수료&nbsp;&nbsp;정산금액&nbsp;&nbsp;<span class="text-faint">[split]</span>
+        <br><br>예시:
+        <br>2026-05-14&nbsp;&nbsp;A005930&nbsp;&nbsp;143700&nbsp;&nbsp;10&nbsp;&nbsp;87&nbsp;&nbsp;-1437087
+        <br>2026-05-14&nbsp;&nbsp;A010120&nbsp;&nbsp;180400&nbsp;&nbsp;-5&nbsp;&nbsp;1500&nbsp;&nbsp;900500
+        <br><br><span class="text-faint">• 수량 부호: 매수 +, 매도 −</span>
+        <br><span class="text-faint">• 정산금액 부호: 현금흐름 (매수 −, 매도 +) 또는 절댓값 모두 허용</span>
+        <br><span class="text-faint">• 종목코드: A 접두사 없으면 자동 추가 (예: 005930 → A005930)</span>
+      </div>
+      <textarea id="input-textarea" rows="10" style="width:100%;padding:10px;font-family:ui-monospace,monospace;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;resize:vertical" placeholder="여기에 붙여넣기..."></textarea>
+      <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+        <button class="icon-btn" onclick="previewInput()">👁️ 미리보기</button>
+        <button class="icon-btn primary" onclick="commitInput()" ${parsed.rows.length === 0 ? 'disabled' : ''}>💾 Sheet에 추가 (${parsed.rows.length}건)</button>
+        <button class="icon-btn" onclick="clearInputForm()">지우기</button>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:12px">
+      <h2>미리보기 (${parsed.rows.length}건)</h2>
+      ${previewHtml}
+    </div>
+
+    ${errorsHtml}
+  `;
+}
+
+function previewInput() {
+  const text = document.getElementById('input-textarea').value;
+  if (!text.trim()) { toast('입력 내용 없음', 'error'); return; }
+  lastParsedInput = parseInputRows(text);
+  const txt = document.getElementById('input-textarea').value;  // preserve
+  renderInput();
+  document.getElementById('input-textarea').value = txt;
+  if (lastParsedInput.errors.length) {
+    toast(`${lastParsedInput.rows.length}건 정상 / ${lastParsedInput.errors.length}건 오류`, lastParsedInput.errors.length === lastParsedInput.errors.length + lastParsedInput.rows.length ? 'error' : '');
+  } else {
+    toast(`${lastParsedInput.rows.length}건 파싱 완료`, 'success');
+  }
+}
+
+function clearInputForm() {
+  document.getElementById('input-textarea').value = '';
+  lastParsedInput = { rows: [], errors: [] };
+  renderInput();
+}
+
+async function commitInput() {
+  if (!isConfigured()) { toast('연결 설정 먼저', 'error'); return; }
+  if (!lastParsedInput.rows.length) { toast('미리보기 먼저 실행', 'error'); return; }
+  if (!confirm(`${lastParsedInput.rows.length}건을 ${TX_TAB} 시트에 추가합니다. 계속?`)) return;
+  try {
+    toast('Sheet에 추가 중...');
+    await sheetAppend(`${TX_TAB}!A:G`, lastParsedInput.rows);
+    toast(`✓ ${lastParsedInput.rows.length}건 추가 완료. 거래내역 다시 로드 중...`, 'success');
+    lastParsedInput = { rows: [], errors: [] };
+    clearInputForm();
+    await refreshTransactions();
+  } catch (e) {
+    toast('추가 실패: ' + e.message, 'error');
+  }
 }
 
 function renderSettings() {
@@ -1252,6 +1425,7 @@ async function refreshTransactions() {
     toast(`${state.transactions.length}건 로드됨`, 'success');
     if (state.currentTab === 'overview') renderOverview();
     if (state.currentTab === 'history') renderHistory();
+    if (state.currentTab === 'input') renderInput();
     if (state.currentTab === 'settings') renderSettings();
   } catch (e) {
     toast('로딩 실패: ' + e.message, 'error');
