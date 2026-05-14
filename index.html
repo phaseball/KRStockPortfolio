@@ -1143,7 +1143,10 @@ function renderChartControls() {
 async function renderTotalChart() {
   const root = document.getElementById('tab-overview');
   root.innerHTML = `
-    <button class="back-btn" onclick="backFromChart()">← 뒤로</button>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:8px">
+      <button class="back-btn" onclick="backFromChart()" style="margin:0">← 뒤로</button>
+      <button class="icon-btn primary" onclick="recalcAndRefreshChart()" title="현재 초기자본 + 거래내역으로 daily_value_kr 시트 재계산">🔄 재계산</button>
+    </div>
     <h2 style="margin-top:0;margin-bottom:12px">📊 총자산 히스토리</h2>
     <div id="chart-controls-host" class="chart-controls"></div>
     <div class="chart-canvas-wrap">
@@ -1153,6 +1156,12 @@ async function renderTotalChart() {
     <div id="chartSummary" style="margin-top:12px"></div>
   `;
   renderChartControls();
+  await drawTotalChart();
+}
+
+async function recalcAndRefreshChart() {
+  await recalcDailyValues();
+  _cachedDaily = null;
   await drawTotalChart();
 }
 
@@ -1342,7 +1351,12 @@ async function drawTotalChart() {
   const startD = series[0].date;
   const endD = series[series.length-1].date;
   const portfolioEnd = portfolioData[portfolioData.length-1];
-  status.textContent = `${series.length}일 · ${startD} → ${endD} · ${(portfolioEnd-100).toFixed(1)}% (base=100, ${state.chartScale} scale)`;
+  // Detect stale data: if newest daily_value date is much older than newest tx date
+  const newestData = _cachedDaily[_cachedDaily.length-1].date;
+  const newestTx = state.transactions.length ? state.transactions[state.transactions.length-1].date : newestData;
+  const stale = newestTx > newestData;
+  const staleNote = stale ? ` · ⚠ 최신 거래일(${newestTx})까지 미반영 → "🔄 재계산" 클릭` : '';
+  status.innerHTML = `${series.length}일 · ${startD} → ${endD} · ${(portfolioEnd-100).toFixed(1)}% (base=100, ${state.chartScale} scale) · daily_value 최종: <b>${newestData}</b>${staleNote}`;
 
   // Summary table: chosen period + each year (2025, 2026)
   renderChartSummary(series);
