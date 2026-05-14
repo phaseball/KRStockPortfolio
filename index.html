@@ -105,14 +105,14 @@
   .hold-hdr {
     display: grid;
     grid-template-columns: 1.6fr 1.1fr 1.1fr 1.1fr 1.2fr;
-    gap: 10px; padding: 6px 14px; font-size: 10px; color: var(--text-faint);
+    gap: 4px; padding: 6px 10px; font-size: 10px; color: var(--text-faint);
     border-bottom: 1px solid var(--border);
     background: var(--bg); position: sticky; top: 0; z-index: 1;
   }
   .holding-row {
     display: grid;
     grid-template-columns: 1.6fr 1.1fr 1.1fr 1.1fr 1.2fr;
-    gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border);
+    gap: 4px; padding: 9px 10px; border-bottom: 1px solid var(--border);
     cursor: pointer; transition: background 0.1s; align-items: center;
   }
   .holding-row:hover { background: rgba(255,255,255,0.02); }
@@ -120,10 +120,10 @@
   .hold-cell { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   .hold-cell .top { font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .hold-cell .bot { font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  /* Price cell: 현재가 thinner+smaller (medium weight), 평단 larger+brighter (similar size, slightly smaller than 현재가) */
+  /* Price cell: 현재가 medium weight; 평단 same style as 매수금액 (.bot — 11px, text-dim) */
   .hold-cell-price .price-now { font-size: 13px; font-weight: 500; white-space: nowrap; }
   .hold-cell-price .price-now .changes { font-size: 11px; font-weight: 400; }
-  .hold-cell-price .price-avg { font-size: 12px; font-weight: 500; color: var(--text); white-space: nowrap; margin-top: 2px; }
+  .hold-cell-price .price-avg { font-size: 11px; color: var(--text-dim); white-space: nowrap; margin-top: 2px; }
   .holding-name { font-weight: 600; font-size: 14px; }
   .holding-code { font-size: 11px; color: var(--text-faint); font-family: ui-monospace, monospace; }
 
@@ -236,8 +236,8 @@ const TX_TAB = BROKERS[0];   // default/legacy
 const NAMES_TAB = 'kr_names';
 const CONFIG_TAB = 'config_kr';
 const DAILY_TAB = 'daily_value_kr';
-// Build timestamp — bump when shipping a new version
-const BUILD_TIME = '0514-15:36:32';
+// Build timestamp comes from document.lastModified (HTTP Last-Modified or file mtime).
+// No manual constant — getBuildTime() reads it dynamically at render.
 
 // KR brokerage fee model (2026, Samsung 증권 default; applied per row in input parser)
 //   매수/매도 브로커리지: 0.0150% of gross
@@ -438,9 +438,27 @@ function updateConnStatus(connected) {
   else { el.textContent = '⚪ 미연결'; el.style.color = 'var(--text-dim)'; }
 }
 
+// Read build time from document.lastModified (browser-parsed Last-Modified header).
+// Format: MMDD-HH:MM:SS in local time (KST for Korean users).
+function getBuildTime() {
+  const lm = document.lastModified;
+  if (lm) {
+    const d = new Date(lm);
+    if (!isNaN(d.getTime())) {
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mi = String(d.getMinutes()).padStart(2, '0');
+      const ss = String(d.getSeconds()).padStart(2, '0');
+      return `${mm}${dd}-${hh}:${mi}:${ss}`;
+    }
+  }
+  return '—';
+}
+
 function updateHeaderInfo() {
   const ver = document.getElementById('verInfo');
-  if (ver) ver.textContent = 'html-' + BUILD_TIME;
+  if (ver) ver.textContent = 'html-' + getBuildTime();
   const pf = document.getElementById('priceInfo');
   if (pf) {
     if (state.lastPriceFetchAt) {
