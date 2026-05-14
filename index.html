@@ -300,9 +300,9 @@ let state = {
 
 // Comparison index/ETF tickers for total value chart (Yahoo symbols)
 const BENCH_TICKERS = [
-  { code: '^KS11',     name: 'KOSPI',       color: '#3b82f6' },
-  { code: '091160.KS', name: 'KODEX반도체', color: '#a855f7' },
-  { code: '^KQ11',     name: 'KOSDAQ',      color: '#10b981' },
+  { code: '^KS11',     name: 'KOSPI',       color: '#9ca3af' },  // gray
+  { code: '091160.KS', name: 'KODEX반도체',  color: '#10b981' },  // green
+  { code: '^KQ11',     name: 'KOSDAQ',      color: '#f59e0b' },  // orange
 ];
 
 // In-memory caches for chart (not persisted)
@@ -956,6 +956,13 @@ function computeSummary(txs, holds, prices, initialCash) {
 // ============ RENDERING ============
 function switchTab(name) {
   state.currentTab = name;
+  // Clicking 개요 acts as "home" — clear any drilled-in view (ticker detail / total chart)
+  if (name === 'overview') {
+    state.selectedCode = null;
+    state.showTotalChart = false;
+    if (_chartInstance) { _chartInstance.destroy(); _chartInstance = null; }
+    saveLocal();
+  }
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
   document.querySelectorAll('.tab-content').forEach(t => t.style.display = 'none');
   document.getElementById('tab-' + name).style.display = 'block';
@@ -1273,10 +1280,13 @@ async function drawTotalChart() {
     if (!histDates.length) continue;
     const benchBase = hist[histDates[0]];
     let lastVal = null;
-    const data = series.map(d => {
+    const data = [];
+    const rawData = [];   // parallel array of raw closes for tooltip
+    for (const d of series) {
       if (hist[d.date] != null) lastVal = hist[d.date];
-      return lastVal != null ? lastVal / benchBase * 100 : null;
-    });
+      data.push(lastVal != null ? lastVal / benchBase * 100 : null);
+      rawData.push(lastVal);
+    }
     benchDatasets.push({
       label: b.name,
       data,
@@ -1286,6 +1296,8 @@ async function drawTotalChart() {
       tension: 0,
       pointRadius: 0,
       spanGaps: true,
+      _rawData: rawData,    // custom field consumed by tooltip callback
+      _code: b.code,
     });
   }
 
@@ -1335,10 +1347,19 @@ async function drawTotalChart() {
               const v = tctx.parsed.y;
               if (v == null) return '';
               const idx = tctx.dataIndex;
-              // Portfolio gets both normalized + raw KRW value (₩ symbol)
+              // Portfolio: normalized + raw KRW (₩)
               if (tctx.dataset.label === '내 포트폴리오' && series[idx]) {
                 const real = series[idx].totalValue;
                 return `${tctx.dataset.label}: ${v.toFixed(1)} (₩${fmtMan(real)})`;
+              }
+              // Benchmark: normalized + raw value (₩ for ETF, plain number for indices)
+              const raw = tctx.dataset._rawData ? tctx.dataset._rawData[idx] : null;
+              if (raw != null) {
+                const isEtf = tctx.dataset._code && !tctx.dataset._code.startsWith('^');
+                const rawStr = isEtf
+                  ? '₩' + Math.round(raw).toLocaleString('en-US')
+                  : raw.toLocaleString('en-US', { maximumFractionDigits: 1, minimumFractionDigits: 1 });
+                return `${tctx.dataset.label}: ${v.toFixed(1)} (${rawStr})`;
               }
               return `${tctx.dataset.label}: ${v.toFixed(1)}`;
             },
