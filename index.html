@@ -97,6 +97,10 @@
   .broker-tab:hover { color: var(--text); }
   .broker-tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 700; }
 
+  /* History table: day summary separator rows */
+  .day-summary { background: rgba(255,255,255,0.04); }
+  .day-summary td { padding: 5px 8px !important; border-top: 1px solid var(--border); }
+
   /* Holdings header + row: 5 columns × 2 rows */
   .hold-hdr {
     display: grid;
@@ -116,10 +120,10 @@
   .hold-cell { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   .hold-cell .top { font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .hold-cell .bot { font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  /* Price cell: 현재가 prominent, 평단 small dim, (changes) small inline */
-  .hold-cell-price .price-now { font-size: 15px; font-weight: 700; white-space: nowrap; }
+  /* Price cell: 현재가 thinner+smaller (medium weight), 평단 larger+brighter (similar size, slightly smaller than 현재가) */
+  .hold-cell-price .price-now { font-size: 13px; font-weight: 500; white-space: nowrap; }
   .hold-cell-price .price-now .changes { font-size: 11px; font-weight: 400; }
-  .hold-cell-price .price-avg { font-size: 10px; color: var(--text-faint); white-space: nowrap; margin-top: 2px; }
+  .hold-cell-price .price-avg { font-size: 12px; font-weight: 500; color: var(--text); white-space: nowrap; margin-top: 2px; }
   .holding-name { font-weight: 600; font-size: 14px; }
   .holding-code { font-size: 11px; color: var(--text-faint); font-family: ui-monospace, monospace; }
 
@@ -233,7 +237,7 @@ const NAMES_TAB = 'kr_names';
 const CONFIG_TAB = 'config_kr';
 const DAILY_TAB = 'daily_value_kr';
 // Build timestamp — bump when shipping a new version
-const BUILD_TIME = '0514-15:12:54';
+const BUILD_TIME = '0514-15:36:32';
 
 // KR brokerage fee model (2026, Samsung 증권 default; applied per row in input parser)
 //   매수/매도 브로커리지: 0.0150% of gross
@@ -322,7 +326,8 @@ function getInitialCashForBroker(broker) {
 // ============ UTILS ============
 // All numeric output: 만(萬, 10,000) unit, NO thousand-separator commas.
 // 1 decimal everywhere unless value < 1만 (then 2 decimals for precision).
-function fmtMan(n) {
+// Pass suffix='' to omit '만' (used in ticker cards/rows).
+function fmtMan(n, suffix = '만') {
   if (n === null || n === undefined || isNaN(n)) return '—';
   const man = n / 10000;
   const abs = Math.abs(man);
@@ -330,13 +335,13 @@ function fmtMan(n) {
   let s;
   if (abs >= 1) s = abs.toFixed(1);
   else s = abs.toFixed(2);
-  return sign + s + '만';
+  return sign + s + suffix;
 }
 // + sign for positives (used for P/L). Same body as fmtMan with leading '+'.
-function fmtManSigned(n) {
+function fmtManSigned(n, suffix = '만') {
   if (n === null || n === undefined || isNaN(n)) return '—';
-  if (n > 0) return '+' + fmtMan(n);
-  return fmtMan(n);
+  if (n > 0) return '+' + fmtMan(n, suffix);
+  return fmtMan(n, suffix);
 }
 // Fixed 2 decimals, no '만' suffix — for prices (평단/현재가/단가) and 정산금액
 function fmtMan2(n) {
@@ -972,15 +977,15 @@ function renderOverview() {
               <div class="price-avg">평단 ${fmtMan2(h.avgCost)}</div>
             </div>
             <div class="hold-cell">
-              <div class="top ${plClass(upl)}">${upl !== null ? fmtManSigned(upl) : '—'}</div>
+              <div class="top ${plClass(upl)}">${upl !== null ? fmtManSigned(upl, '') : '—'}</div>
               <div class="bot ${plClass(uplPct)}">${uplPct !== null ? '(' + fmtPct(uplPct) + ')' : '—'}</div>
             </div>
             <div class="hold-cell">
-              <div class="top">${value !== null ? fmtMan(value) : fmtMan(lineCost)}</div>
-              <div class="bot">${fmtMan(lineCost)}</div>
+              <div class="top">${value !== null ? fmtMan(value, '') : fmtMan(lineCost, '')}</div>
+              <div class="bot">${fmtMan(lineCost, '')}</div>
             </div>
             <div class="hold-cell">
-              <div class="top" style="white-space:nowrap"><span class="${plClass(h.realizedPLThisYear)}">${fmtManSigned(h.realizedPLThisYear)}</span> <span class="text-faint">/</span> <span class="${plClass(h.realizedPL)}">${fmtManSigned(h.realizedPL)}</span></div>
+              <div class="top" style="white-space:nowrap"><span class="${plClass(h.realizedPLThisYear)}">${fmtManSigned(h.realizedPLThisYear, '')}</span> <span class="text-faint">/</span> <span class="${plClass(h.realizedPL)}">${fmtManSigned(h.realizedPL, '')}</span></div>
             </div>
           </div>
         `;
@@ -998,9 +1003,14 @@ function renderOverview() {
 }
 
 function pricesAsOfStr() {
-  const dates = Object.values(state.prices).map(p => p.asOf).filter(Boolean);
-  if (!dates.length) return '시세 미수집';
-  return '시세 기준: ' + dates.sort().slice(-1)[0];
+  if (!state.lastPriceFetchAt) return '시세기준-—';
+  const d = new Date(state.lastPriceFetchAt);
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mi = String(d.getMinutes()).padStart(2, '0');
+  const ss = String(d.getSeconds()).padStart(2, '0');
+  return `시세기준-${mm}${dd}-${hh}:${mi}:${ss}`;
 }
 
 function selectTicker(code) { state.selectedCode = code; renderOverview(); }
@@ -1022,8 +1032,8 @@ function renderTickerDetail(code) {
     <div class="cards-grid">
       <div class="card summary-card"><div class="label">보유수량</div><div class="value">${h.qty.toString()}주</div><div class="sub">평단 ${fmtMan2(h.avgCost)}</div></div>
       <div class="card summary-card"><div class="label">현재가</div><div class="value">${curPrice ? fmtMan2(curPrice) : '—'}</div><div class="sub">${fmtChangePcts(priceObj).trim() || ''}</div></div>
-      <div class="card summary-card"><div class="label">평가손익</div><div class="value ${plClass(upl)}">${fmtManSigned(upl)}</div><div class="sub ${plClass(uplPct)}">${fmtPct(uplPct)}</div></div>
-      <div class="card summary-card"><div class="label">실현손익</div><div class="value ${plClass(h.realizedPL)}">${fmtManSigned(h.realizedPL)}</div></div>
+      <div class="card summary-card"><div class="label">평가손익</div><div class="value ${plClass(upl)}">${fmtManSigned(upl, '')}</div><div class="sub ${plClass(uplPct)}">${fmtPct(uplPct)}</div></div>
+      <div class="card summary-card"><div class="label">실현손익</div><div class="value ${plClass(h.realizedPL)}">${fmtManSigned(h.realizedPL, '')}</div></div>
     </div>
   `;
 
@@ -1047,7 +1057,7 @@ function renderTickerDetail(code) {
   const rows = [...walked].reverse().map(t => {
     const splitBadge = t.splitRaw ? ` <span style="color:var(--warn);font-size:10px">[split ${escapeHtml(t.splitRaw)}]</span>` : '';
     const qtyCell = t.splitRaw ? `${signed(t.qty)}<br><span class="text-faint" style="font-size:10px">(원본 ${signed(t.origQty)})</span>` : signed(t.qty);
-    const priceCell = t.splitRaw ? `${fmtMan2(t.price)}<br><span class="text-faint" style="font-size:10px">(원본 ${fmtMan2(t.origPrice)})</span>` : fmtMan2(t.price);
+    const priceCell = t.splitRaw ? `${fmtMan3(t.price)}<br><span class="text-faint" style="font-size:10px">(원본 ${fmtMan3(t.origPrice)})</span>` : fmtMan3(t.price);
     return `
     <tr>
       <td>${t.date}${splitBadge}</td>
@@ -1055,7 +1065,7 @@ function renderTickerDetail(code) {
       <td>${qtyCell}</td>
       <td>${priceCell}</td>
       <td>${fmtMan3(t.fees)}</td>
-      <td>${fmtMan2(t.settle)}</td>
+      <td>${fmtMan3(t.settle)}</td>
       <td><b>${t.runningQty.toString()}</b></td>
     </tr>
   `;
@@ -1139,25 +1149,64 @@ function applyHistoryFilter() {
   if (dir === 'sell') rows = rows.filter(t => t.qty < 0);
 
   document.getElementById('hist-count').textContent = `${rows.length}건`;
-  document.getElementById('hist-body').innerHTML = rows.slice(0, 500).map(t => `
-    <tr style="cursor:pointer" onclick="state.selectedCode='${t.code}';switchTab('overview')">
-      <td>${t.date}</td>
-      <td><span style="font-weight:600">${escapeHtml((state.names[t.code] || t.code).slice(0, 18))}</span> <span class="text-faint" style="font-size:11px">${t.code}</span></td>
-      <td class="${t.qty > 0 ? 'gain' : 'loss'}">${t.qty > 0 ? '매수' : '매도'}</td>
-      <td>${signed(t.qty)}</td>
-      <td>${fmtMan2(t.price)}</td>
-      <td>${fmtMan3(t.fees)}</td>
-      <td>${fmtMan2(t.settle)}</td>
-    </tr>
-  `).join('');
-  if (rows.length > 500) document.getElementById('hist-body').innerHTML += `<tr><td colspan="7" style="text-align:center;color:var(--text-faint);padding:14px">… 처음 500건만 표시 (전체 ${rows.length}건)</td></tr>`;
+
+  // Cap to 500 rows for performance, but still group by date with summaries
+  const display = rows.slice(0, 500);
+  const html = [];
+  let prevDate = null;
+  let buf = [];   // transactions accumulator for current date
+  const flushDate = () => {
+    if (!buf.length) return;
+    const date = buf[0].date;
+    const buys = buf.filter(t => t.qty > 0);
+    const sells = buf.filter(t => t.qty < 0);
+    const buyAmt = buys.reduce((s, t) => s + t.settle, 0);
+    const sellAmt = sells.reduce((s, t) => s + t.settle, 0);
+    const buyFees = buys.reduce((s, t) => s + t.fees, 0);
+    const sellFees = sells.reduce((s, t) => s + t.fees, 0);
+    const net = sellAmt - buyAmt;   // positive = net cash in
+    html.push(`<tr class="day-summary">
+      <td><b>${date}</b></td>
+      <td colspan="6" style="font-size:11px">
+        <span class="gain">매수 ${buys.length}건 ${fmtMan(buyAmt, '')}</span>
+        <span class="text-faint"> · </span>
+        <span class="loss">매도 ${sells.length}건 ${fmtMan(sellAmt, '')}</span>
+        <span class="text-faint"> · </span>
+        순 <span class="${plClass(net)}">${fmtManSigned(net, '')}</span>
+        <span class="text-faint"> · </span>
+        수수료 ${fmtMan3(buyFees + sellFees)}
+      </td>
+    </tr>`);
+    for (const t of buf) {
+      html.push(`<tr style="cursor:pointer" onclick="state.selectedCode='${t.code}';switchTab('overview')">
+        <td></td>
+        <td><span style="font-weight:600">${escapeHtml((state.names[t.code] || t.code).slice(0, 18))}</span> <span class="text-faint" style="font-size:11px">${t.code}</span></td>
+        <td class="${t.qty > 0 ? 'gain' : 'loss'}">${t.qty > 0 ? '매수' : '매도'}</td>
+        <td>${signed(t.qty)}</td>
+        <td>${fmtMan2(t.price)}</td>
+        <td>${fmtMan3(t.fees)}</td>
+        <td>${fmtMan2(t.settle)}</td>
+      </tr>`);
+    }
+    buf = [];
+  };
+  for (const t of display) {
+    if (t.date !== prevDate) {
+      flushDate();
+      prevDate = t.date;
+    }
+    buf.push(t);
+  }
+  flushDate();
+  if (rows.length > 500) html.push(`<tr><td colspan="7" style="text-align:center;color:var(--text-faint);padding:14px">… 처음 500건만 표시 (전체 ${rows.length}건)</td></tr>`);
+  document.getElementById('hist-body').innerHTML = html.join('');
 }
 
 // ============ INPUT (Sheet Append) ============
 // v4 format:
 //   #계정명 YYMMDD              ← header sets date for following rows; can appear multiple times
-//   종목명,순번,가격(만원),수량   ← data row; qty signed (+매수 / −매도)
-// Looks up code from kr_names by name. Estimates fees/거래세 from typical KR rates.
+//   종목명,수량,가격(만원),순번    ← data row; qty signed (+매수 / −매도)
+// Looks up code from kr_names by name. Estimates fees/거래세 from KR rates (0.015% + 0.20% sell tax on stocks).
 function parseInputRows(text) {
   const rows = [];
   const errors = [];
@@ -1200,11 +1249,11 @@ function parseInputRows(text) {
 
     const parts = line.split(',').map(p => p.trim());
     if (parts.length < 4) {
-      errors.push(`${lineNum}행: 컬럼 부족 (${parts.length}개, 4개 필요: 종목명,순번,가격(만),수량)`);
+      errors.push(`${lineNum}행: 컬럼 부족 (${parts.length}개, 4개 필요: 종목명,수량,가격(만),순번)`);
       return;
     }
 
-    const [name, seqRaw, priceManRaw, qtyRaw] = parts;
+    const [name, qtyRaw, priceManRaw, seqRaw] = parts;
     const priceMan = parseFloat(priceManRaw);
     const qty = parseFloat(qtyRaw);
 
@@ -1290,21 +1339,22 @@ function renderInput() {
       </div>
       <div style="background:var(--bg);padding:10px;border-radius:6px;font-size:11px;color:var(--text-dim);font-family:ui-monospace,monospace;line-height:1.7;margin-bottom:10px">
         <b style="color:var(--accent)">#계정명 YYMMDD</b>&nbsp;&nbsp;<span class="text-faint">← 헤더 (이후 행의 날짜)</span>
-        <br>종목명,&nbsp;순번,&nbsp;가격(만원),&nbsp;수량
-        <br>종목명,&nbsp;순번,&nbsp;가격(만원),&nbsp;수량
+        <br>종목명,&nbsp;수량,&nbsp;가격(만원),&nbsp;순번
+        <br>종목명,&nbsp;수량,&nbsp;가격(만원),&nbsp;순번
         <br><br>예시:
         <br>#삼성국내&nbsp;260514
-        <br>삼성SDI,1,17.452,1
-        <br>LS일렉트릭,2,18.04,3
-        <br>삼성전자,3,14.37,-5
+        <br>삼성SDI,3,17.32,1
+        <br>LS일렉트릭,2,18.04,2
+        <br>삼성전자,-5,14.37,3
         <br><br>#삼성국내&nbsp;260515
         <br>...
         <br><br><span class="text-faint">• 수량 부호: 매수 +, 매도 −</span>
-        <br><span class="text-faint">• 가격은 만원 단위 (예: 17.452 = 174,520원)</span>
+        <br><span class="text-faint">• 가격은 만원 단위 (예: 17.32 = 173,200원)</span>
+        <br><span class="text-faint">• 순번: 동일 날짜 내 거래 순서 (참고용)</span>
         <br><span class="text-faint">• 종목명은 <code>kr_names</code> 탭에 등록된 이름과 일치해야 함</span>
-        <br><span class="text-faint">• 수수료/거래세는 자동 추정 (수수료 0.014% + 매도 거래세 0.18%)</span>
+        <br><span class="text-faint">• 수수료: 0.015% / 매도 주식 거래세: +0.20% (ETF는 거래세 비과세)</span>
       </div>
-      <textarea id="input-textarea" rows="10" style="width:100%;padding:10px;font-family:ui-monospace,monospace;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;resize:vertical" placeholder="#삼성국내 260514&#10;삼성SDI,1,17.452,1"></textarea>
+      <textarea id="input-textarea" rows="10" style="width:100%;padding:10px;font-family:ui-monospace,monospace;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;resize:vertical" placeholder="#삼성국내 260514&#10;삼성SDI,3,17.32,1"></textarea>
       <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
         <button class="icon-btn" onclick="previewInput()">👁️ 미리보기</button>
         <button class="icon-btn primary" onclick="commitInput()" ${parsed.rows.length === 0 ? 'disabled' : ''}>💾 Sheet에 추가 (${parsed.rows.length}건)</button>
