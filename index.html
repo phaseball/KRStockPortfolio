@@ -356,35 +356,79 @@ function parseNum(v) {
   return 0;
 }
 
-// Normalize date: accepts "2025-03-21", "2025/03/21", or serial number → "YYYY-MM-DD"
+// Normalize date: accepts "2025-03-21", "2025/03/21", "3/21/2025", serial number, etc. → "YYYY-MM-DD"
 function parseDate(v) {
   if (v === null || v === undefined || v === '') return '';
-  if (typeof v === 'string') return v.replace(/\//g, '-').slice(0, 10);
   if (typeof v === 'number') {
-    // Excel/Sheets serial date (days since 1899-12-30)
     const ms = Math.round((v - 25569) * 86400000);
     const d = new Date(ms);
     if (isNaN(d.getTime())) return String(v);
     return d.toISOString().slice(0, 10);
   }
+  if (typeof v === 'string') {
+    const s = v.trim();
+    // ISO-like: YYYY-MM-DD / YYYY/MM/DD / YYYY.MM.DD
+    let m = s.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})/);
+    if (m) {
+      return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+    }
+    // US/short: M/D/YYYY or MM/DD/YYYY (or .-separated)
+    m = s.match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{4})/);
+    if (m) {
+      return `${m[3]}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`;
+    }
+    // Fallback: try Date.parse
+    const d = new Date(s);
+    if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+    return s.slice(0, 10);
+  }
   return String(v);
+}
+
+// Parse split marker "N/M" or plain number → multiplier (price *= mul, qty /= mul)
+// "1/5" → 0.2 (forward 1:5: pre-split price was 5×, qty was 1/5×)
+// "5"   → 5   (reverse 5:1: pre-split price was 1/5×, qty was 5×)
+function parseSplitMul(s) {
+  if (!s) return 1;
+  const str = String(s).trim();
+  if (!str) return 1;
+  const parts = str.split('/');
+  if (parts.length === 2) {
+    const num = parseFloat(parts[0]);
+    const den = parseFloat(parts[1]);
+    if (num && den) return num / den;
+  } else {
+    const v = parseFloat(str);
+    if (v && v !== 0) return v;
+  }
+  return 1;
 }
 
 // ============ DATA LOADING ============
 async function loadTransactions() {
-  const rows = await sheetGet(`${TX_TAB}!A:F`);
+  const rows = await sheetGet(`${TX_TAB}!A:G`);   // now reads column G (split) too
   if (rows.length < 2) return [];
   const out = [];
   for (let i = 1; i < rows.length; i++) {
     const r = rows[i];
     if (!r[0]) continue;
+    const origPrice = parseNum(r[2]);
+    const origQty = parseNum(r[3]);
+    const fees = parseNum(r[4]);
+    const settle = parseNum(r[5]);
+    const splitRaw = r[6] ? String(r[6]).trim() : '';
+    const mul = parseSplitMul(splitRaw);
     out.push({
       date: parseDate(r[0]),
       code: String(r[1] || '').trim(),
-      price: parseNum(r[2]),
-      qty: parseNum(r[3]),
-      fees: parseNum(r[4]),
-      settle: parseNum(r[5]),
+      // Split-normalized values (used in all calculations)
+      price: origPrice * mul,
+      qty: origQty / mul,
+      // Originals (kept for reference / display)
+      origPrice, origQty, splitRaw,
+      // Fees and settle don't change with splits (total money flow is fixed)
+      fees,
+      settle,
       seq: i,
     });
   }
@@ -662,17 +706,45 @@ function renderTickerDetail(code) {
     </div>
   `;
 
-  // Transactions table for this code
-  const rows = [...txs].reverse().map(t => `
+  // Transactions table for this code, processed in the SAME order as the holdings compute
+  // (date asc, buys-first within same date, then sheet row order)
+  // — this is what the running balance reflects.
+  const txsForCode = state.transactions.filter(t => t.code === code);
+  let runningQty = 0;
+  let clampEvents = 0;
+  const walked = txsForCode.map(t => {
+    if (t.qty > 0) {
+      runningQty += t.qty;
+    } else {
+      runningQty += t.qty;  // already negative
+      if (runningQty < 0) clampEvents++;
+      if (runningQty <= 0) runningQty = 0;  // v4 clamp
+    }
+    return { ...t, runningQty };
+  });
+
+  const rows = [...walked].reverse().map(t => {
+    const splitBadge = t.splitRaw ? ` <span style="color:var(--warn);font-size:10px">[split ${escapeHtml(t.splitRaw)}]</span>` : '';
+    const qtyCell = t.splitRaw ? `${signed(t.qty)}<br><span class="text-faint" style="font-size:10px">(원본 ${signed(t.origQty)})</span>` : signed(t.qty);
+    const priceCell = t.splitRaw ? `${fmtNum(t.price)}<br><span class="text-faint" style="font-size:10px">(원본 ${fmtNum(t.origPrice)})</span>` : fmtNum(t.price);
+    return `
     <tr>
-      <td>${t.date}</td>
+      <td>${t.date}${splitBadge}</td>
       <td class="${t.qty > 0 ? 'gain' : 'loss'}">${t.qty > 0 ? '매수' : '매도'}</td>
-      <td>${signed(t.qty)}</td>
-      <td>${fmtNum(t.price)}</td>
+      <td>${qtyCell}</td>
+      <td>${priceCell}</td>
       <td>${fmtNum(t.fees)}</td>
       <td>${fmtNum(t.settle)}</td>
+      <td><b>${t.runningQty.toLocaleString()}</b></td>
     </tr>
-  `).join('');
+  `;
+  }).join('');
+
+  // Sanity check: simple sum vs current qty
+  const simpleSum = txsForCode.reduce((s, t) => s + t.qty, 0);
+  const matchHint = (simpleSum === h.qty)
+    ? `<span style="color:var(--text-faint)">단순합 = 현재 보유수량 = ${h.qty}</span>`
+    : `<span style="color:var(--warn)">⚠️ 단순합(${simpleSum}) ≠ 보유수량(${h.qty}) — clamping ${clampEvents}회 발생</span>`;
 
   root.innerHTML = `
     <button class="back-btn" onclick="state.selectedCode=null;renderOverview()">← 보유 종목으로</button>
@@ -680,9 +752,12 @@ function renderTickerDetail(code) {
     <div style="font-size:12px;color:var(--text-faint);font-family:ui-monospace,monospace;margin-bottom:16px">${code}</div>
     ${summary}
     <div class="card" style="padding:0">
-      <div style="padding:12px 14px;border-bottom:1px solid var(--border)"><h2 style="margin:0">거래내역 (${txs.length})</h2></div>
+      <div style="padding:12px 14px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+        <h2 style="margin:0">거래내역 (${txsForCode.length})</h2>
+        <div style="font-size:11px">${matchHint}</div>
+      </div>
       <div style="overflow-x:auto"><table class="history-table">
-        <thead><tr><th>매매일</th><th>구분</th><th>수량</th><th>단가</th><th>수수료</th><th>정산금액</th></tr></thead>
+        <thead><tr><th>매매일</th><th>구분</th><th>수량</th><th>단가</th><th>수수료</th><th>정산금액</th><th>누적</th></tr></thead>
         <tbody>${rows}</tbody>
       </table></div>
     </div>
@@ -784,7 +859,10 @@ function renderSettings() {
       </div>
       <div style="margin-top:14px;padding:10px;background:var(--bg);border-radius:6px;font-size:12px;color:var(--text-dim);line-height:1.7">
         <div><b>📋 시트 탭 구성</b></div>
-        <div>• <b>${TX_TAB}</b>: 매매일, 종목코드, 체결단가, 체결수량, 수수료, 정산금액</div>
+        <div>• <b>${TX_TAB}</b>: 매매일 · 종목코드 · 체결단가 · 체결수량 · 수수료 · 정산금액 · <b style="color:var(--accent)">split</b></div>
+        <div style="padding-left:14px;font-size:11px">└ <b>split</b> (G열): 액면분할 마커. 분할 이전 행에만 입력.</div>
+        <div style="padding-left:14px;font-size:11px">&nbsp;&nbsp;예) 1/5 분할 (가격 1/5, 수량 5배): <code>1/5</code> 입력 → 가격×0.2, 수량÷0.2</div>
+        <div style="padding-left:14px;font-size:11px">&nbsp;&nbsp;예) 5:1 병합 (가격 5배, 수량 1/5): <code>5</code> 입력 → 가격×5, 수량÷5</div>
         <div>• <b>${NAMES_TAB}</b>: 종목코드, 종목명 (선택)</div>
         <div>• <b>${CONFIG_TAB}</b>: A1=initial_cash, B1=금액 (선택)</div>
         <div style="margin-top:6px"><b>⚠️ 시트 공유 필수</b>: 위 시트를 ${saEmail ? '<code>' + escapeHtml(saEmail) + '</code>' : 'service account 이메일'}에 편집자로 공유해야 합니다.</div>
@@ -814,6 +892,7 @@ function renderSettings() {
         <div>• 손익: 이동평균(Moving Average) 방식, v4와 동일</div>
         <div>• 매수 평단: tx.price 기준 (수수료 미포함)</div>
         <div>• 매도 실현손익: 매도금액 - 평단×수량 - 수수료</div>
+        <div>• <b>액면분할:</b> 시트 G열에 split 입력 → 자동 정규화 (정산금액은 변경 없음)</div>
         <div>• 종목코드는 'A' 접두사 포함 (예: A005930)</div>
       </div>
     </div>
@@ -876,7 +955,7 @@ async function ensureTabs() {
     for (const tab of [TX_TAB, NAMES_TAB, CONFIG_TAB, DAILY_TAB]) {
       try { await sheetCreate(tab); } catch (e) {}
     }
-    try { await sheetAppend(`${TX_TAB}!A1`, [['매매일', '종목코드', '체결단가', '체결수량', '수수료', '정산금액']]); } catch (e) {}
+    try { await sheetAppend(`${TX_TAB}!A1`, [['매매일', '종목코드', '체결단가', '체결수량', '수수료', '정산금액', 'split']]); } catch (e) {}
     try { await sheetAppend(`${NAMES_TAB}!A1`, [['종목코드', '종목명']]); } catch (e) {}
     toast('탭 확인/생성 완료', 'success');
   } catch (e) {
