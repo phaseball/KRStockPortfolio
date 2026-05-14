@@ -211,6 +211,7 @@ let state = {
   transactions: [],
   names: {},
   prices: {},
+  codeMarket: {},      // code → '.KS' or '.KQ' (cached after first fetch)
   selectedCode: null,
   currentTab: 'overview',
 };
@@ -222,6 +223,7 @@ function saveLocal() {
     initialCash: state.initialCash,
     transactions: state.transactions,
     names: state.names, prices: state.prices,
+    codeMarket: state.codeMarket,
   };
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(persist)); } catch (e) {}
 }
@@ -277,6 +279,16 @@ function fmtPct(n) {
   if (n === null || n === undefined || isNaN(n)) return '—';
   const s = (n * 100).toFixed(2) + '%';
   return n > 0 ? '+' + s : s;
+}
+// "(d% / 1w%)" — colored, in parens; returns '' if no data
+function fmtChangePcts(priceObj) {
+  if (!priceObj) return '';
+  const d = priceObj.changeRate, w = priceObj.week1Rate;
+  if ((d === null || d === undefined) && (w === null || w === undefined)) return '';
+  const parts = [];
+  if (d !== null && d !== undefined) parts.push(`<span class="${plClass(d)}">${fmtPct(d)}</span>`);
+  if (w !== null && w !== undefined) parts.push(`<span class="${plClass(w)}">${fmtPct(w)}</span>`);
+  return ` (${parts.join(' / ')})`;
 }
 function plClass(n) {
   if (n === null || n === undefined || isNaN(n) || n === 0) return '';
@@ -504,51 +516,90 @@ const CORS_PROXIES = [
   'https://api.allorigins.win/raw?url=',
 ];
 
-// Try Yahoo with both .KS and .KQ suffixes
-async function fetchYahooPrice(code) {
-  const numCode = stripA(code);
-  const suffixes = ['.KS', '.KQ'];
-  for (const sfx of suffixes) {
-    const symbol = numCode + sfx;
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1mo`;
-    for (const proxy of CORS_PROXIES) {
-      try {
-        const r = await fetch(proxy + encodeURIComponent(url), { signal: AbortSignal.timeout(10000) });
-        if (!r.ok) continue;
-        const d = await r.json();
-        const result = d?.chart?.result?.[0];
-        if (!result) continue;
-        const meta = result.meta;
-        const price = meta?.regularMarketPrice;
-        const prevClose = meta?.chartPreviousClose ?? meta?.previousClose;
-        if (!price) continue;
-
-        // Build daily-close series in chronological order (filter nulls)
-        const ts = result.timestamp || [];
-        const rawCloses = result.indicators?.quote?.[0]?.close || [];
-        const series = [];
-        for (let i = 0; i < ts.length; i++) {
-          if (rawCloses[i] != null) series.push({ ts: ts[i], close: Number(rawCloses[i]) });
-        }
-        // Excluded today's bar (compare price vs strictly prior closes)
-        const todayISO = new Date().toISOString().slice(0, 10);
-        const past = series.filter(s => new Date(s.ts * 1000).toISOString().slice(0, 10) < todayISO);
-        const yesterdayClose = past.length > 0 ? past[past.length - 1].close : (prevClose ?? null);
-        const week1Close = past.length >= 5 ? past[past.length - 5].close : null;
-        const changeRate = yesterdayClose ? (price - yesterdayClose) / yesterdayClose : null;
-        const week1Rate = week1Close ? (price - week1Close) / week1Close : null;
-
-        return { price: Number(price), changeRate, week1Rate, asOf: new Date().toISOString().slice(0, 10), market: sfx };
-      } catch (e) { /* try next proxy/suffix */ }
-    }
+// Single-symbol fetch returning full meta+series snapshot. Caller decides which to keep.
+async function _fetchYahooOne(symbol, range = '1mo') {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=${range}`;
+  for (const proxy of CORS_PROXIES) {
+    try {
+      const r = await fetch(proxy + encodeURIComponent(url), { signal: AbortSignal.timeout(10000) });
+      if (!r.ok) continue;
+      const d = await r.json();
+      const result = d?.chart?.result?.[0];
+      if (!result) continue;
+      const meta = result.meta;
+      const price = meta?.regularMarketPrice;
+      if (!price) continue;
+      const ts = result.timestamp || [];
+      const rawCloses = result.indicators?.quote?.[0]?.close || [];
+      const series = [];
+      for (let i = 0; i < ts.length; i++) {
+        if (rawCloses[i] != null) series.push({ ts: ts[i], close: Number(rawCloses[i]) });
+      }
+      return {
+        price: Number(price),
+        meta,
+        marketTime: Number(meta.regularMarketTime || 0),
+        exchangeName: meta.exchangeName || '',
+        series,
+      };
+    } catch (e) { /* try next proxy */ }
   }
   return null;
+}
+
+// Try Yahoo with both .KS and .KQ; pick the one with the most recent regularMarketTime.
+// (Yahoo may return stale data for a delisted listing under one suffix while the active
+// listing lives under the other suffix — for example 에스티큐브 052020 is KOSDAQ, but
+// 052020.KS could return cached data for a different/delisted stock.)
+async function fetchYahooPrice(code) {
+  const numCode = stripA(code);
+  const cached = state.codeMarket?.[code];
+  const suffixes = cached ? [cached] : ['.KS', '.KQ'];
+
+  const results = await Promise.all(suffixes.map(async sfx => {
+    const snap = await _fetchYahooOne(numCode + sfx);
+    return snap ? { sfx, snap } : null;
+  }));
+  const valid = results.filter(r => r);
+  if (!valid.length) {
+    // If we tried only the cached suffix, retry the other one as fallback
+    if (cached) {
+      const other = cached === '.KS' ? '.KQ' : '.KS';
+      const snap = await _fetchYahooOne(numCode + other);
+      if (snap) valid.push({ sfx: other, snap });
+    }
+    if (!valid.length) return null;
+  }
+  // Pick the listing with the most recent market time (active vs stale)
+  valid.sort((a, b) => b.snap.marketTime - a.snap.marketTime);
+  const winner = valid[0];
+
+  // Compute yesterday/1w from the series (today's bar excluded)
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const past = winner.snap.series.filter(s => new Date(s.ts * 1000).toISOString().slice(0, 10) < todayISO);
+  const yesterdayClose = past.length > 0 ? past[past.length - 1].close : null;
+  const week1Close = past.length >= 5 ? past[past.length - 5].close : null;
+  const price = winner.snap.price;
+  const changeRate = yesterdayClose ? (price - yesterdayClose) / yesterdayClose : null;
+  const week1Rate = week1Close ? (price - week1Close) / week1Close : null;
+
+  // Cache market suffix
+  if (!state.codeMarket) state.codeMarket = {};
+  state.codeMarket[code] = winner.sfx;
+
+  return {
+    price,
+    changeRate,
+    week1Rate,
+    asOf: new Date().toISOString().slice(0, 10),
+    market: winner.sfx,
+    exchangeName: winner.snap.exchangeName,
+  };
 }
 
 async function fetchAllPrices(codes) {
   const results = {};
   const failed = [];
-  // Parallel batches of 5 (Yahoo is generally OK with this through CORS proxies)
   const batchSize = 5;
   for (let i = 0; i < codes.length; i += batchSize) {
     const batch = codes.slice(i, i + batchSize);
@@ -561,39 +612,62 @@ async function fetchAllPrices(codes) {
   return { results, failed };
 }
 
-// Historical daily closes via Yahoo (.KS first, then .KQ). Returns {YYYY-MM-DD: close}.
+// Single-symbol historical fetch. Caller picks.
+async function _fetchYahooHistOne(symbol, fromTs, toTs) {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?period1=${fromTs}&period2=${toTs}&interval=1d`;
+  for (const proxy of CORS_PROXIES) {
+    try {
+      const r = await fetch(proxy + encodeURIComponent(url), { signal: AbortSignal.timeout(20000) });
+      if (!r.ok) continue;
+      const d = await r.json();
+      const result = d?.chart?.result?.[0];
+      if (!result) continue;
+      const ts = result.timestamp || [];
+      const quote = result.indicators?.quote?.[0] || {};
+      const adjclose = result.indicators?.adjclose?.[0]?.adjclose || [];
+      const close = quote.close || [];
+      const map = {};
+      let latestTs = 0;
+      for (let i = 0; i < ts.length; i++) {
+        const c = adjclose[i] ?? close[i];
+        if (c != null) {
+          const date = new Date(ts[i] * 1000).toISOString().slice(0, 10);
+          map[date] = Number(c);
+          if (ts[i] > latestTs) latestTs = ts[i];
+        }
+      }
+      if (Object.keys(map).length > 0) return { map, latestTs, count: Object.keys(map).length };
+    } catch (e) { /* next proxy */ }
+  }
+  return null;
+}
+
+// Historical daily closes via Yahoo. Uses cached suffix if available; otherwise
+// dual-fetches and picks by most recent data.
 async function fetchHistoricalPrices(code, fromDate, toDate) {
   const numCode = stripA(code);
   const fromTs = Math.floor(new Date(fromDate + 'T00:00:00Z').getTime() / 1000);
   const toTs = Math.floor(new Date(toDate + 'T00:00:00Z').getTime() / 1000) + 86400;
-  const suffixes = ['.KS', '.KQ'];
-  for (const sfx of suffixes) {
-    const symbol = numCode + sfx;
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?period1=${fromTs}&period2=${toTs}&interval=1d`;
-    for (const proxy of CORS_PROXIES) {
-      try {
-        const r = await fetch(proxy + encodeURIComponent(url), { signal: AbortSignal.timeout(20000) });
-        if (!r.ok) continue;
-        const d = await r.json();
-        const result = d?.chart?.result?.[0];
-        if (!result) continue;
-        const ts = result.timestamp || [];
-        const quote = result.indicators?.quote?.[0] || {};
-        const adjclose = result.indicators?.adjclose?.[0]?.adjclose || [];
-        const close = quote.close || [];
-        const map = {};
-        for (let i = 0; i < ts.length; i++) {
-          const c = adjclose[i] ?? close[i];
-          if (c != null) {
-            const date = new Date(ts[i] * 1000).toISOString().slice(0, 10);
-            map[date] = Number(c);
-          }
-        }
-        if (Object.keys(map).length > 0) return map;
-      } catch (e) { /* try next */ }
-    }
+  const cached = state.codeMarket?.[code];
+  const suffixes = cached ? [cached] : ['.KS', '.KQ'];
+
+  const results = await Promise.all(suffixes.map(async sfx => {
+    const snap = await _fetchYahooHistOne(numCode + sfx, fromTs, toTs);
+    return snap ? { sfx, ...snap } : null;
+  }));
+  let valid = results.filter(r => r);
+  if (!valid.length && cached) {
+    const other = cached === '.KS' ? '.KQ' : '.KS';
+    const snap = await _fetchYahooHistOne(numCode + other, fromTs, toTs);
+    if (snap) valid = [{ sfx: other, ...snap }];
   }
-  return {};
+  if (!valid.length) return {};
+  // Prefer the listing with most recent data, then more data points
+  valid.sort((a, b) => (b.latestTs - a.latestTs) || (b.count - a.count));
+  const winner = valid[0];
+  if (!state.codeMarket) state.codeMarket = {};
+  state.codeMarket[code] = winner.sfx;
+  return winner.map;
 }
 
 // Concurrency-limited parallel historical fetch
@@ -756,7 +830,7 @@ function renderOverview() {
             <div>
               <div class="holding-name">${escapeHtml(name)}</div>
               <div class="holding-code">${code}</div>
-              <div class="holding-meta">${h.qty.toString()}주 · 평단 ${fmtMan2(h.avgCost)} · 현재가 ${curPrice ? fmtMan2(curPrice) : '—'}${priceObj && priceObj.changeRate !== null && priceObj.changeRate !== undefined ? ` <span class="${plClass(priceObj.changeRate)}">${fmtPct(priceObj.changeRate)}</span>` : ''}${priceObj && priceObj.week1Rate !== null && priceObj.week1Rate !== undefined ? ` <span class="text-faint">/</span> <span class="${plClass(priceObj.week1Rate)}">${fmtPct(priceObj.week1Rate)}<span class="text-faint">·1w</span></span>` : ''}</div>
+              <div class="holding-meta">${h.qty.toString()}주 · 평단 ${fmtMan2(h.avgCost)} · 현재가 ${curPrice ? fmtMan2(curPrice) : '—'}${fmtChangePcts(priceObj)}</div>
             </div>
             <div class="holding-value">
               <div class="price">${value !== null ? fmtMan(value) : fmtMan(lineCost) + ' (취득가)'}</div>
@@ -801,7 +875,7 @@ function renderTickerDetail(code) {
   const summary = `
     <div class="cards-grid">
       <div class="card summary-card"><div class="label">보유수량</div><div class="value">${h.qty.toString()}주</div><div class="sub">평단 ${fmtMan2(h.avgCost)}</div></div>
-      <div class="card summary-card"><div class="label">현재가</div><div class="value">${curPrice ? fmtMan2(curPrice) : '—'}</div><div class="sub">${priceObj && priceObj.changeRate !== null && priceObj.changeRate !== undefined ? `<span class="${plClass(priceObj.changeRate)}">${fmtPct(priceObj.changeRate)}</span>` : ''}${priceObj && priceObj.week1Rate !== null && priceObj.week1Rate !== undefined ? ` <span class="text-faint">/</span> <span class="${plClass(priceObj.week1Rate)}">${fmtPct(priceObj.week1Rate)}·1w</span>` : ''}</div></div>
+      <div class="card summary-card"><div class="label">현재가</div><div class="value">${curPrice ? fmtMan2(curPrice) : '—'}</div><div class="sub">${fmtChangePcts(priceObj).trim() || ''}</div></div>
       <div class="card summary-card"><div class="label">평가손익</div><div class="value ${plClass(upl)}">${fmtManSigned(upl)}</div><div class="sub ${plClass(uplPct)}">${fmtPct(uplPct)}</div></div>
       <div class="card summary-card"><div class="label">실현손익</div><div class="value ${plClass(h.realizedPL)}">${fmtManSigned(h.realizedPL)}</div></div>
     </div>
@@ -1455,7 +1529,7 @@ async function refreshAll() {
 function clearCache() {
   if (!confirm('로컬 캐시를 모두 삭제하시겠습니까? (Sheet 데이터는 영향 없음)')) return;
   localStorage.removeItem(STORAGE_KEY);
-  state.transactions = []; state.prices = {}; state.names = {};
+  state.transactions = []; state.prices = {}; state.names = {}; state.codeMarket = {};
   state.accessToken = null; state.tokenExpiry = 0;
   state.saKey = null; state.saKeyRaw = ''; state.sheetId = ''; state.initialCash = 0;
   updateConnStatus(false);
