@@ -314,7 +314,7 @@ function updateConnStatus(connected) {
 // ============ GOOGLE SHEETS API ============
 async function sheetGet(range) {
   const token = await getAccessToken();
-  const url = `https://sheets.googleapis.com/v4/spreadsheets/${state.sheetId}/values/${encodeURIComponent(range)}`;
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${state.sheetId}/values/${encodeURIComponent(range)}?valueRenderOption=UNFORMATTED_VALUE&dateTimeRenderOption=FORMATTED_STRING`;
   const r = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
   if (!r.ok) throw new Error('Sheet 읽기 실패: ' + r.status);
   const d = await r.json();
@@ -344,6 +344,32 @@ async function sheetCreate(title) {
   return r.ok;
 }
 
+// Robust number parse: handles numbers, "10,380", "₩10,380", "", null
+function parseNum(v) {
+  if (v === null || v === undefined || v === '') return 0;
+  if (typeof v === 'number') return v;
+  if (typeof v === 'string') {
+    const cleaned = v.replace(/[^0-9.\-]/g, '');
+    const n = Number(cleaned);
+    return isNaN(n) ? 0 : n;
+  }
+  return 0;
+}
+
+// Normalize date: accepts "2025-03-21", "2025/03/21", or serial number → "YYYY-MM-DD"
+function parseDate(v) {
+  if (v === null || v === undefined || v === '') return '';
+  if (typeof v === 'string') return v.replace(/\//g, '-').slice(0, 10);
+  if (typeof v === 'number') {
+    // Excel/Sheets serial date (days since 1899-12-30)
+    const ms = Math.round((v - 25569) * 86400000);
+    const d = new Date(ms);
+    if (isNaN(d.getTime())) return String(v);
+    return d.toISOString().slice(0, 10);
+  }
+  return String(v);
+}
+
 // ============ DATA LOADING ============
 async function loadTransactions() {
   const rows = await sheetGet(`${TX_TAB}!A:F`);
@@ -353,16 +379,15 @@ async function loadTransactions() {
     const r = rows[i];
     if (!r[0]) continue;
     out.push({
-      date: r[0],            // YYYY-MM-DD
-      code: r[1],
-      price: Number(r[2]) || 0,
-      qty: Number(r[3]) || 0,
-      fees: Number(r[4]) || 0,
-      settle: Number(r[5]) || 0,
-      seq: i,                // row-order seq
+      date: parseDate(r[0]),
+      code: String(r[1] || '').trim(),
+      price: parseNum(r[2]),
+      qty: parseNum(r[3]),
+      fees: parseNum(r[4]),
+      settle: parseNum(r[5]),
+      seq: i,
     });
   }
-  // Sort by date asc, then by seq for tie-break
   out.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : a.seq - b.seq);
   return out;
 }
@@ -372,7 +397,7 @@ async function loadNames() {
     const rows = await sheetGet(`${NAMES_TAB}!A:B`);
     const map = {};
     for (let i = 1; i < rows.length; i++) {
-      if (rows[i][0] && rows[i][1]) map[rows[i][0]] = rows[i][1];
+      if (rows[i][0] && rows[i][1]) map[String(rows[i][0]).trim()] = String(rows[i][1]).trim();
     }
     return map;
   } catch (e) { return {}; }
@@ -382,7 +407,7 @@ async function loadConfig() {
   try {
     const rows = await sheetGet(`${CONFIG_TAB}!A:B`);
     const cfg = {};
-    rows.forEach(r => { if (r[0]) cfg[r[0]] = r[1]; });
+    rows.forEach(r => { if (r[0]) cfg[String(r[0]).trim()] = r[1]; });
     return cfg;
   } catch (e) { return {}; }
 }
@@ -440,67 +465,69 @@ async function fetchAllPrices(codes) {
 }
 
 // ============ ANALYTICS ============
+// Moving-average cost basis (matches StockPortfolio v4):
+//   Buy:  newAvgCost = (avgCost * qty + tx.qty * tx.price) / (qty + tx.qty)   [gross price, no fees]
+//   Sell: realizedPL = sellQty * (tx.price - avgCost) - tx.fees               [fees deducted from PL]
+//   avgCost is preserved across partial sells; clamps to 0 when qty<=0
 function computeHoldings(txs) {
-  // FIFO per code. Returns: {code: {qty, avgCost, realizedPL, lots: [...]}}
   const holds = {};
+  const curYear = new Date().getFullYear().toString();
   for (const tx of txs) {
-    if (!holds[tx.code]) holds[tx.code] = { qty: 0, totalCost: 0, avgCost: 0, realizedPL: 0, lots: [] };
+    if (!tx.code) continue;
+    if (!holds[tx.code]) holds[tx.code] = { qty: 0, avgCost: 0, realizedPL: 0, realizedPLThisYear: 0, buyCount: 0, sellCount: 0 };
     const h = holds[tx.code];
     if (tx.qty > 0) {
-      // Buy: settle already includes fees → use settle for cost basis
-      const costPerShare = tx.settle / tx.qty;
-      h.lots.push({ qty: tx.qty, cost: costPerShare, date: tx.date });
+      // Buy: update moving average using gross price (fees NOT added to cost basis)
+      const newCost = h.avgCost * h.qty + tx.qty * tx.price;
       h.qty += tx.qty;
-      h.totalCost += tx.settle;
-    } else {
-      // Sell: settle is net proceeds (after fees deduction)
-      let sellQty = -tx.qty;
-      const netPerShare = tx.settle / sellQty;  // gross proceeds per share, net of fees
-      while (sellQty > 0 && h.lots.length > 0) {
-        const lot = h.lots[0];
-        const taken = Math.min(sellQty, lot.qty);
-        const lotCost = taken * lot.cost;
-        const lotProceeds = taken * netPerShare;
-        h.realizedPL += (lotProceeds - lotCost);
-        h.totalCost -= lotCost;
-        h.qty -= taken;
-        lot.qty -= taken;
-        if (lot.qty === 0) h.lots.shift();
-        sellQty -= taken;
-      }
-      // If sellQty > 0 still, means oversold (shouldn't happen) — ignore residual
+      h.avgCost = h.qty > 0 ? newCost / h.qty : 0;
+      h.buyCount++;
+    } else if (tx.qty < 0) {
+      // Sell: realized PL using moving-avg basis, fees deducted
+      const sellQty = -tx.qty;
+      const pl = sellQty * (tx.price - h.avgCost) - tx.fees;
+      h.realizedPL += pl;
+      if (tx.date.startsWith(curYear)) h.realizedPLThisYear += pl;
+      h.qty -= sellQty;
+      h.sellCount++;
+      if (h.qty <= 0) { h.qty = 0; h.avgCost = 0; }
     }
-    h.avgCost = h.qty > 0 ? h.totalCost / h.qty : 0;
   }
   return holds;
 }
 
 function computeSummary(txs, holds, prices) {
+  // Cash: tracks actual cash flow including fees (settle column = gross ± fees)
   let buyTotal = 0, sellTotal = 0, feesTotal = 0;
   for (const tx of txs) {
     feesTotal += tx.fees;
-    if (tx.qty > 0) buyTotal += tx.settle;
-    else sellTotal += tx.settle;
+    if (tx.qty > 0) buyTotal += tx.settle;      // settle for buy = price*qty + fees
+    else sellTotal += tx.settle;                 // settle for sell = price*qty - fees
   }
   const cash = state.initialCash - buyTotal + sellTotal;
-  let marketValue = 0, unrealizedPL = 0, costBasis = 0, realizedPL = 0;
+
+  // Holdings sums
+  let marketValue = 0, unrealizedPL = 0, costBasis = 0, realizedPL = 0, realizedPLYTD = 0;
   for (const code of Object.keys(holds)) {
     const h = holds[code];
     realizedPL += h.realizedPL;
+    realizedPLYTD += h.realizedPLThisYear;
     if (h.qty > 0) {
-      costBasis += h.totalCost;
+      const lineCost = h.qty * h.avgCost;
+      costBasis += lineCost;
       const p = prices[code] ? prices[code].price : null;
       if (p) {
-        marketValue += h.qty * p;
-        unrealizedPL += h.qty * p - h.totalCost;
+        const mv = h.qty * p;
+        marketValue += mv;
+        unrealizedPL += mv - lineCost;
       } else {
-        marketValue += h.totalCost;  // fall back to cost basis when no price
+        marketValue += lineCost;  // fallback when no price available
       }
     }
   }
   const totalAsset = cash + marketValue;
   const totalGain = totalAsset - state.initialCash;
-  return { cash, marketValue, unrealizedPL, costBasis, realizedPL, totalAsset, totalGain, buyTotal, sellTotal, feesTotal };
+  return { cash, marketValue, unrealizedPL, costBasis, realizedPL, realizedPLYTD, totalAsset, totalGain, buyTotal, sellTotal, feesTotal };
 }
 
 // ============ RENDERING ============
@@ -537,7 +564,7 @@ function renderOverview() {
       <div class="card summary-card">
         <div class="label">평가금액 (보유)</div>
         <div class="value">${fmtKRW(sum.marketValue)}</div>
-        <div class="sub">취득가 ${fmtKRW(sum.costBasis)}</div>
+        <div class="sub ${plClass(sum.unrealizedPL)}">평가손익 ${fmtKRW(sum.unrealizedPL)}</div>
       </div>
       <div class="card summary-card">
         <div class="label">총수익</div>
@@ -545,9 +572,9 @@ function renderOverview() {
         <div class="sub">총자산 ${fmtKRW(sum.totalAsset)}</div>
       </div>
       <div class="card summary-card">
-        <div class="label">실현손익 · 평가손익</div>
-        <div class="value ${plClass(sum.realizedPL)}" style="font-size:16px">${fmtKRW(sum.realizedPL)}</div>
-        <div class="sub ${plClass(sum.unrealizedPL)}">평가 ${fmtKRW(sum.unrealizedPL)}</div>
+        <div class="label">실현손익 (누적)</div>
+        <div class="value ${plClass(sum.realizedPL)}">${fmtKRW(sum.realizedPL)}</div>
+        <div class="sub ${plClass(sum.realizedPLYTD)}">올해 ${fmtKRW(sum.realizedPLYTD)}</div>
       </div>
     </div>
   `;
@@ -567,8 +594,9 @@ function renderOverview() {
         const name = state.names[code] || code;
         const priceObj = state.prices[code];
         const curPrice = priceObj ? priceObj.price : null;
+        const lineCost = h.qty * h.avgCost;
         const value = curPrice ? h.qty * curPrice : null;
-        const upl = curPrice ? value - h.totalCost : null;
+        const upl = curPrice ? value - lineCost : null;
         const uplPct = curPrice && h.avgCost > 0 ? (curPrice - h.avgCost) / h.avgCost : null;
         return `
           <div class="holding-row" onclick="selectTicker('${code}')">
@@ -578,7 +606,7 @@ function renderOverview() {
               <div class="holding-meta">${h.qty.toLocaleString()}주 · 평단 ${fmtNum(h.avgCost)} · 현재가 ${curPrice ? fmtNum(curPrice) : '—'}</div>
             </div>
             <div class="holding-value">
-              <div class="price">${value !== null ? fmtKRW(value) : fmtKRW(h.totalCost) + ' (취득가)'}</div>
+              <div class="price">${value !== null ? fmtKRW(value) : fmtKRW(lineCost) + ' (취득가)'}</div>
               <div class="pl ${plClass(upl)}">${upl !== null ? fmtKRW(upl) + ' (' + fmtPct(uplPct) + ')' : '—'}</div>
             </div>
           </div>
@@ -609,11 +637,12 @@ function renderTickerDetail(code) {
   const name = state.names[code] || code;
   const txs = state.transactions.filter(t => t.code === code);
   const holds = computeHoldings(state.transactions);
-  const h = holds[code] || { qty: 0, avgCost: 0, totalCost: 0, realizedPL: 0 };
+  const h = holds[code] || { qty: 0, avgCost: 0, realizedPL: 0 };
   const priceObj = state.prices[code];
   const curPrice = priceObj ? priceObj.price : null;
+  const lineCost = h.qty * h.avgCost;
   const value = curPrice && h.qty > 0 ? h.qty * curPrice : null;
-  const upl = value ? value - h.totalCost : null;
+  const upl = value !== null ? value - lineCost : null;
   const uplPct = curPrice && h.avgCost > 0 ? (curPrice - h.avgCost) / h.avgCost : null;
 
   const summary = `
@@ -774,7 +803,9 @@ function renderSettings() {
         <div>• 인증: Service Account (JWT 자동 갱신)</div>
         <div>• 시세 출처: 네이버 금융 (CORS 프록시 경유)</div>
         <div>• 저장: Google Sheet (원본) + 로컬 캐시</div>
-        <div>• 손익: FIFO 방식, 수수료/세금은 정산금액에 이미 반영</div>
+        <div>• 손익: 이동평균(Moving Average) 방식, v4와 동일</div>
+        <div>• 매수 평단: tx.price 기준 (수수료 미포함)</div>
+        <div>• 매도 실현손익: 매도금액 - 평단×수량 - 수수료</div>
         <div>• 종목코드는 'A' 접두사 포함 (예: A005930)</div>
       </div>
     </div>
