@@ -238,10 +238,24 @@ function loadLocal() {
 }
 
 // ============ UTILS ============
-function fmtKRW(n) {
+// 만(萬, 10,000) unit formatter — Korean readability.
+// Decimals scale with magnitude: ≥1000만 → no decimal, ≥10만 → 1 decimal, <10만 → 2 decimals.
+function fmtMan(n) {
   if (n === null || n === undefined || isNaN(n)) return '—';
-  const sign = n < 0 ? '-' : '';
-  return sign + '₩' + Math.abs(Math.round(n)).toLocaleString('ko-KR');
+  const man = n / 10000;
+  const abs = Math.abs(man);
+  const sign = man < 0 ? '-' : '';
+  let s;
+  if (abs >= 1000) s = Math.round(abs).toLocaleString('ko-KR');
+  else if (abs >= 10) s = abs.toFixed(1);
+  else s = abs.toFixed(2);
+  return sign + s + '만';
+}
+// Variant with explicit + sign for positives (P/L)
+function fmtManSigned(n) {
+  if (n === null || n === undefined || isNaN(n)) return '—';
+  if (n > 0) return '+' + fmtMan(n);
+  return fmtMan(n);
 }
 function fmtNum(n) {
   if (n === null || n === undefined || isNaN(n)) return '—';
@@ -472,41 +486,35 @@ async function loadConfig() {
 }
 
 // ============ PRICE FETCHING ============
-// Naver Finance API (via CORS proxy)
+// Yahoo Finance for KR stocks: numeric code + ".KS" (KOSPI) or ".KQ" (KOSDAQ)
 const CORS_PROXIES = [
   'https://corsproxy.io/?',
   'https://api.allorigins.win/raw?url=',
 ];
 
-async function fetchNaverPrice(code) {
+// Try Yahoo with both .KS and .KQ suffixes
+async function fetchYahooPrice(code) {
   const numCode = stripA(code);
-  const url = `https://m.stock.naver.com/api/stock/${numCode}/integration`;
-  for (const proxy of CORS_PROXIES) {
-    try {
-      const fullUrl = proxy === 'https://corsproxy.io/?'
-        ? proxy + encodeURIComponent(url)
-        : proxy + encodeURIComponent(url);
-      const r = await fetch(fullUrl, { signal: AbortSignal.timeout(8000) });
-      if (!r.ok) continue;
-      const d = await r.json();
-      // Naver integration response structure
-      const dealInfo = d.dealTrendInfos && d.dealTrendInfos[0];
-      const stock = d.stockInfo || d.totalInfos || {};
-      // Try different paths to find current price
-      let price = null, changeRate = null;
-      if (d.dealTrendInfos && d.dealTrendInfos.length > 0) {
-        price = Number(d.dealTrendInfos[0].closePrice);
-      }
-      if (!price && d.totalInfos) {
-        const cp = d.totalInfos.find(x => x.code === 'closePrice');
-        if (cp) price = Number(cp.value.replace(/,/g, ''));
-        const cr = d.totalInfos.find(x => x.code === 'fluctuationsRatio');
-        if (cr) changeRate = Number(cr.value) / 100;
-      }
-      if (price) {
-        return { price, changeRate, asOf: new Date().toISOString().slice(0, 10) };
-      }
-    } catch (e) { /* try next proxy */ }
+  const suffixes = ['.KS', '.KQ'];
+  for (const sfx of suffixes) {
+    const symbol = numCode + sfx;
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=5d`;
+    for (const proxy of CORS_PROXIES) {
+      try {
+        const r = await fetch(proxy + encodeURIComponent(url), { signal: AbortSignal.timeout(10000) });
+        if (!r.ok) continue;
+        const d = await r.json();
+        const result = d?.chart?.result?.[0];
+        if (!result) continue;
+        const meta = result.meta;
+        const price = meta?.regularMarketPrice;
+        const prevClose = meta?.chartPreviousClose ?? meta?.previousClose;
+        if (price) {
+          const changeRate = prevClose ? (price - prevClose) / prevClose : null;
+          return { price: Number(price), changeRate, asOf: new Date().toISOString().slice(0, 10), market: sfx };
+        }
+      } catch (e) { /* try next proxy/suffix */ }
+    }
   }
   return null;
 }
@@ -514,42 +522,50 @@ async function fetchNaverPrice(code) {
 async function fetchAllPrices(codes) {
   const results = {};
   const failed = [];
-  // sequential to avoid rate limiting
-  for (const code of codes) {
-    const p = await fetchNaverPrice(code);
-    if (p) results[code] = p;
-    else failed.push(code);
+  // Parallel batches of 5 (Yahoo is generally OK with this through CORS proxies)
+  const batchSize = 5;
+  for (let i = 0; i < codes.length; i += batchSize) {
+    const batch = codes.slice(i, i + batchSize);
+    const out = await Promise.all(batch.map(c => fetchYahooPrice(c)));
+    batch.forEach((c, idx) => {
+      if (out[idx]) results[c] = out[idx];
+      else failed.push(c);
+    });
   }
   return { results, failed };
 }
 
-// Historical daily closes for one code over a date range (Naver chart API).
-// Returns: { "YYYY-MM-DD": closePrice, ... }
+// Historical daily closes via Yahoo (.KS first, then .KQ). Returns {YYYY-MM-DD: close}.
 async function fetchHistoricalPrices(code, fromDate, toDate) {
   const numCode = stripA(code);
-  const start = fromDate.replace(/-/g, '') + '0000';
-  const end = toDate.replace(/-/g, '') + '2359';
-  const url = `https://api.stock.naver.com/chart/domestic/item/${numCode}/day?startDateTime=${start}&endDateTime=${end}`;
-  for (const proxy of CORS_PROXIES) {
-    try {
-      const fullUrl = proxy + encodeURIComponent(url);
-      const r = await fetch(fullUrl, { signal: AbortSignal.timeout(20000) });
-      if (!r.ok) continue;
-      const data = await r.json();
-      if (!Array.isArray(data)) continue;
-      const map = {};
-      for (const row of data) {
-        const dateRaw = row.localDate || row.localDateTime || row.tradeDate;
-        const close = row.closePrice ?? row.close;
-        if (dateRaw && close !== undefined && close !== null) {
-          const dStr = String(dateRaw).slice(0, 8);
-          if (/^\d{8}$/.test(dStr)) {
-            map[`${dStr.slice(0,4)}-${dStr.slice(4,6)}-${dStr.slice(6,8)}`] = Number(close);
+  const fromTs = Math.floor(new Date(fromDate + 'T00:00:00Z').getTime() / 1000);
+  const toTs = Math.floor(new Date(toDate + 'T00:00:00Z').getTime() / 1000) + 86400;
+  const suffixes = ['.KS', '.KQ'];
+  for (const sfx of suffixes) {
+    const symbol = numCode + sfx;
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?period1=${fromTs}&period2=${toTs}&interval=1d`;
+    for (const proxy of CORS_PROXIES) {
+      try {
+        const r = await fetch(proxy + encodeURIComponent(url), { signal: AbortSignal.timeout(20000) });
+        if (!r.ok) continue;
+        const d = await r.json();
+        const result = d?.chart?.result?.[0];
+        if (!result) continue;
+        const ts = result.timestamp || [];
+        const quote = result.indicators?.quote?.[0] || {};
+        const adjclose = result.indicators?.adjclose?.[0]?.adjclose || [];
+        const close = quote.close || [];
+        const map = {};
+        for (let i = 0; i < ts.length; i++) {
+          const c = adjclose[i] ?? close[i];
+          if (c != null) {
+            const date = new Date(ts[i] * 1000).toISOString().slice(0, 10);
+            map[date] = Number(c);
           }
         }
-      }
-      if (Object.keys(map).length > 0) return map;
-    } catch (e) { /* try next proxy */ }
+        if (Object.keys(map).length > 0) return map;
+      } catch (e) { /* try next */ }
+    }
   }
   return {};
 }
@@ -668,23 +684,23 @@ function renderOverview() {
     <div class="cards-grid">
       <div class="card summary-card">
         <div class="label">현금</div>
-        <div class="value">${fmtKRW(sum.cash)}</div>
-        <div class="sub">초기자본 ${fmtKRW(state.initialCash)}</div>
+        <div class="value">${fmtMan(sum.cash)}</div>
+        <div class="sub">초기자본 ${fmtMan(state.initialCash)}</div>
       </div>
       <div class="card summary-card">
         <div class="label">평가금액 (보유)</div>
-        <div class="value">${fmtKRW(sum.marketValue)}</div>
-        <div class="sub ${plClass(sum.unrealizedPL)}">평가손익 ${fmtKRW(sum.unrealizedPL)}</div>
+        <div class="value">${fmtMan(sum.marketValue)}</div>
+        <div class="sub ${plClass(sum.unrealizedPL)}">평가손익 ${fmtMan(sum.unrealizedPL)}</div>
       </div>
       <div class="card summary-card">
         <div class="label">총수익</div>
-        <div class="value ${plClass(sum.totalGain)}">${fmtKRW(sum.totalGain)}</div>
-        <div class="sub">총자산 ${fmtKRW(sum.totalAsset)}</div>
+        <div class="value ${plClass(sum.totalGain)}">${fmtMan(sum.totalGain)}</div>
+        <div class="sub">총자산 ${fmtMan(sum.totalAsset)}</div>
       </div>
       <div class="card summary-card">
         <div class="label">실현손익 (누적)</div>
-        <div class="value ${plClass(sum.realizedPL)}">${fmtKRW(sum.realizedPL)}</div>
-        <div class="sub ${plClass(sum.realizedPLYTD)}">올해 ${fmtKRW(sum.realizedPLYTD)}</div>
+        <div class="value ${plClass(sum.realizedPL)}">${fmtMan(sum.realizedPL)}</div>
+        <div class="sub ${plClass(sum.realizedPLYTD)}">올해 ${fmtMan(sum.realizedPLYTD)}</div>
       </div>
     </div>
   `;
@@ -713,11 +729,11 @@ function renderOverview() {
             <div>
               <div class="holding-name">${escapeHtml(name)}</div>
               <div class="holding-code">${code}</div>
-              <div class="holding-meta">${h.qty.toLocaleString()}주 · 평단 ${fmtNum(h.avgCost)} · 현재가 ${curPrice ? fmtNum(curPrice) : '—'}</div>
+              <div class="holding-meta">${h.qty.toLocaleString()}주 · 평단 ${fmtMan(h.avgCost)} · 현재가 ${curPrice ? fmtMan(curPrice) : '—'}</div>
             </div>
             <div class="holding-value">
-              <div class="price">${value !== null ? fmtKRW(value) : fmtKRW(lineCost) + ' (취득가)'}</div>
-              <div class="pl ${plClass(upl)}">${upl !== null ? fmtKRW(upl) + ' (' + fmtPct(uplPct) + ')' : '—'}</div>
+              <div class="price">${value !== null ? fmtMan(value) : fmtMan(lineCost) + ' (취득가)'}</div>
+              <div class="pl ${plClass(upl)}">${upl !== null ? fmtManSigned(upl) + ' (' + fmtPct(uplPct) + ')' : '—'}</div>
             </div>
           </div>
         `;
@@ -757,10 +773,10 @@ function renderTickerDetail(code) {
 
   const summary = `
     <div class="cards-grid">
-      <div class="card summary-card"><div class="label">보유수량</div><div class="value">${h.qty.toLocaleString()}주</div><div class="sub">평단 ${fmtNum(h.avgCost)}</div></div>
-      <div class="card summary-card"><div class="label">현재가</div><div class="value">${curPrice ? fmtNum(curPrice) : '—'}</div><div class="sub">${priceObj && priceObj.changeRate !== null ? fmtPct(priceObj.changeRate) : ''}</div></div>
-      <div class="card summary-card"><div class="label">평가손익</div><div class="value ${plClass(upl)}">${fmtKRW(upl)}</div><div class="sub ${plClass(uplPct)}">${fmtPct(uplPct)}</div></div>
-      <div class="card summary-card"><div class="label">실현손익</div><div class="value ${plClass(h.realizedPL)}">${fmtKRW(h.realizedPL)}</div></div>
+      <div class="card summary-card"><div class="label">보유수량</div><div class="value">${h.qty.toLocaleString()}주</div><div class="sub">평단 ${fmtMan(h.avgCost)}</div></div>
+      <div class="card summary-card"><div class="label">현재가</div><div class="value">${curPrice ? fmtMan(curPrice) : '—'}</div><div class="sub">${priceObj && priceObj.changeRate !== null ? fmtPct(priceObj.changeRate) : ''}</div></div>
+      <div class="card summary-card"><div class="label">평가손익</div><div class="value ${plClass(upl)}">${fmtManSigned(upl)}</div><div class="sub ${plClass(uplPct)}">${fmtPct(uplPct)}</div></div>
+      <div class="card summary-card"><div class="label">실현손익</div><div class="value ${plClass(h.realizedPL)}">${fmtManSigned(h.realizedPL)}</div></div>
     </div>
   `;
 
@@ -784,15 +800,15 @@ function renderTickerDetail(code) {
   const rows = [...walked].reverse().map(t => {
     const splitBadge = t.splitRaw ? ` <span style="color:var(--warn);font-size:10px">[split ${escapeHtml(t.splitRaw)}]</span>` : '';
     const qtyCell = t.splitRaw ? `${signed(t.qty)}<br><span class="text-faint" style="font-size:10px">(원본 ${signed(t.origQty)})</span>` : signed(t.qty);
-    const priceCell = t.splitRaw ? `${fmtNum(t.price)}<br><span class="text-faint" style="font-size:10px">(원본 ${fmtNum(t.origPrice)})</span>` : fmtNum(t.price);
+    const priceCell = t.splitRaw ? `${fmtMan(t.price)}<br><span class="text-faint" style="font-size:10px">(원본 ${fmtMan(t.origPrice)})</span>` : fmtMan(t.price);
     return `
     <tr>
       <td>${t.date}${splitBadge}</td>
       <td class="${t.qty > 0 ? 'gain' : 'loss'}">${t.qty > 0 ? '매수' : '매도'}</td>
       <td>${qtyCell}</td>
       <td>${priceCell}</td>
-      <td>${fmtNum(t.fees)}</td>
-      <td>${fmtNum(t.settle)}</td>
+      <td>${fmtMan(t.fees)}</td>
+      <td>${fmtMan(t.settle)}</td>
       <td><b>${t.runningQty.toLocaleString()}</b></td>
     </tr>
   `;
@@ -882,9 +898,9 @@ function applyHistoryFilter() {
       <td><span style="font-weight:600">${escapeHtml((state.names[t.code] || t.code).slice(0, 18))}</span> <span class="text-faint" style="font-size:11px">${t.code}</span></td>
       <td class="${t.qty > 0 ? 'gain' : 'loss'}">${t.qty > 0 ? '매수' : '매도'}</td>
       <td>${signed(t.qty)}</td>
-      <td>${fmtNum(t.price)}</td>
-      <td>${fmtNum(t.fees)}</td>
-      <td>${fmtNum(t.settle)}</td>
+      <td>${fmtMan(t.price)}</td>
+      <td>${fmtMan(t.fees)}</td>
+      <td>${fmtMan(t.settle)}</td>
     </tr>
   `).join('');
   if (rows.length > 500) document.getElementById('hist-body').innerHTML += `<tr><td colspan="7" style="text-align:center;color:var(--text-faint);padding:14px">… 처음 500건만 표시 (전체 ${rows.length}건)</td></tr>`;
@@ -956,7 +972,7 @@ function renderSettings() {
       <h2>일별 가치 (daily_value)</h2>
       <div style="font-size:12px;color:var(--text-dim);line-height:1.7;margin-bottom:10px">
         <code>${DAILY_TAB}</code> 탭에 일별 스냅샷을 저장합니다. 컬럼: <code>date · totalValue · cash · holdings · prices</code> (v4와 동일).
-        모든 보유 종목의 일별 종가를 네이버에서 가져와 총자산을 계산합니다.
+        모든 보유 종목의 일별 종가를 Yahoo Finance에서 가져와 총자산을 계산합니다.
       </div>
       <button class="icon-btn primary" onclick="recalcDailyValues()">📊 daily_value 재계산</button>
     </div>
@@ -965,7 +981,7 @@ function renderSettings() {
       <h2>도움말</h2>
       <div style="font-size:13px;color:var(--text-dim);line-height:1.8">
         <div>• 인증: Service Account (JWT 자동 갱신)</div>
-        <div>• 시세 출처: 네이버 금융 (CORS 프록시 경유)</div>
+        <div>• 시세 출처: Yahoo Finance (<code>.KS</code> KOSPI, <code>.KQ</code> KOSDAQ 자동 시도, CORS 프록시 경유)</div>
         <div>• 저장: Google Sheet (원본) + 로컬 캐시</div>
         <div>• 손익: 이동평균(Moving Average) 방식, v4와 동일</div>
         <div>• 매수 평단: tx.price 기준 (수수료 미포함)</div>
@@ -1161,7 +1177,7 @@ async function recalcDailyValues() {
 
     const last = out[out.length - 1];
     const failedNote = failed.length ? ` (시세 실패 ${failed.length}종목)` : '';
-    toast(`✓ ${out.length - 1}일 저장. 최종 총자산 ${fmtKRW(last[1])}${failedNote}`, 'success');
+    toast(`✓ ${out.length - 1}일 저장. 최종 총자산 ${fmtMan(last[1])}${failedNote}`, 'success');
     if (failed.length) console.warn('Codes without price history:', failed);
   } catch (e) {
     toast('실패: ' + e.message, 'error');
