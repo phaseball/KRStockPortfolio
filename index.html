@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>국내주식 포트폴리오</title>
-<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jsrsasign/10.9.0/jsrsasign-all-min.js"></script>
 <style>
   :root {
     --bg: #0e1014;
@@ -164,8 +164,8 @@
 <div class="header">
   <div class="header-title">📈 국내주식 포트폴리오</div>
   <div class="header-actions">
-    <button class="icon-btn" id="refresh-btn" onclick="refreshAll()">🔄</button>
-    <button class="icon-btn primary" id="auth-btn" onclick="handleAuth()">로그인</button>
+    <span id="conn-status" style="font-size:12px;color:var(--text-dim);margin-right:4px">⚪ 미연결</span>
+    <button class="icon-btn primary" id="refresh-btn" onclick="refreshAll()">🔄</button>
   </div>
 </div>
 
@@ -193,27 +193,26 @@ const DAILY_TAB = 'daily_value_kr';
 
 // ============ STATE ============
 let state = {
-  clientId: '',
+  saKey: null,         // parsed Service Account JSON
+  saKeyRaw: '',        // raw JSON string for re-display
   sheetId: '',
   initialCash: 0,
   accessToken: null,
   tokenExpiry: 0,
   transactions: [],
-  names: {},        // code → name
-  prices: {},       // code → {price, changeRate, asOf}
+  names: {},
+  prices: {},
   selectedCode: null,
   currentTab: 'overview',
 };
 
-
-
 function saveLocal() {
   const persist = {
-    clientId: state.clientId, sheetId: state.sheetId,
+    saKeyRaw: state.saKeyRaw,
+    sheetId: state.sheetId,
     initialCash: state.initialCash,
     transactions: state.transactions,
     names: state.names, prices: state.prices,
-    accessToken: state.accessToken, tokenExpiry: state.tokenExpiry,
   };
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(persist)); } catch (e) {}
 }
@@ -224,6 +223,9 @@ function loadLocal() {
     if (raw) {
       const p = JSON.parse(raw);
       Object.assign(state, p);
+      if (state.saKeyRaw) {
+        try { state.saKey = JSON.parse(state.saKeyRaw); } catch (e) {}
+      }
     }
   } catch (e) {}
 }
@@ -262,65 +264,81 @@ function toast(msg, type = '') {
 
 function stripA(code) { return code.startsWith('A') ? code.slice(1) : code; }
 
-// ============ AUTH ============
-let tokenClient = null;
-
-function initAuth() {
-  if (!state.clientId) return;
-  if (!window.google || !window.google.accounts) {
-    setTimeout(initAuth, 200);
-    return;
+// ============ AUTH (Service Account JWT) ============
+async function getAccessToken() {
+  if (state.accessToken && Date.now() < state.tokenExpiry - 60000) return state.accessToken;
+  if (!state.saKey || !state.saKey.client_email || !state.saKey.private_key) {
+    throw new Error('서비스 계정 JSON이 없습니다 (설정 탭에서 입력)');
   }
-  tokenClient = google.accounts.oauth2.initTokenClient({
-    client_id: state.clientId,
+  if (!window.KJUR) throw new Error('JWT 라이브러리 로드 실패 (인터넷 연결 확인)');
+
+  const now = Math.floor(Date.now() / 1000);
+  const header = { alg: 'RS256', typ: 'JWT' };
+  const payload = {
+    iss: state.saKey.client_email,
     scope: 'https://www.googleapis.com/auth/spreadsheets',
-    callback: (resp) => {
-      if (resp.error) { toast('인증 실패: ' + resp.error, 'error'); return; }
-      state.accessToken = resp.access_token;
-      state.tokenExpiry = Date.now() + (resp.expires_in - 60) * 1000;
-      document.getElementById('auth-btn').textContent = '✓ 로그인됨';
-      toast('로그인 성공', 'success');
-      refreshAll();
-    },
+    aud: 'https://oauth2.googleapis.com/token',
+    iat: now,
+    exp: now + 3600,
+  };
+  const jwt = KJUR.jws.JWS.sign('RS256', JSON.stringify(header), JSON.stringify(payload), state.saKey.private_key);
+
+  const resp = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${jwt}`,
   });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error('Google Auth 실패: ' + (err.error_description || resp.status));
+  }
+  const d = await resp.json();
+  state.accessToken = d.access_token;
+  state.tokenExpiry = Date.now() + (d.expires_in * 1000);
+  updateConnStatus(true);
+  return state.accessToken;
 }
 
-function handleAuth() {
-  if (!state.clientId) { toast('설정에서 Google OAuth Client ID를 먼저 입력하세요', 'error'); switchTab('settings'); return; }
-  if (!tokenClient) initAuth();
-  if (tokenClient) tokenClient.requestAccessToken();
+function isConfigured() {
+  return !!(state.saKey && state.saKey.client_email && state.saKey.private_key && state.sheetId);
 }
 
-function isAuthed() { return state.accessToken && Date.now() < state.tokenExpiry; }
+function updateConnStatus(connected) {
+  const el = document.getElementById('conn-status');
+  if (!el) return;
+  if (connected) { el.textContent = '🟢 연결됨'; el.style.color = 'var(--gain)'; }
+  else if (isConfigured()) { el.textContent = '🟡 설정됨'; el.style.color = 'var(--warn)'; }
+  else { el.textContent = '⚪ 미연결'; el.style.color = 'var(--text-dim)'; }
+}
 
 // ============ GOOGLE SHEETS API ============
 async function sheetGet(range) {
-  if (!isAuthed()) throw new Error('인증 필요');
+  const token = await getAccessToken();
   const url = `https://sheets.googleapis.com/v4/spreadsheets/${state.sheetId}/values/${encodeURIComponent(range)}`;
-  const r = await fetch(url, { headers: { Authorization: 'Bearer ' + state.accessToken } });
-  if (!r.ok) throw new Error('Sheet read failed: ' + r.status);
+  const r = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
+  if (!r.ok) throw new Error('Sheet 읽기 실패: ' + r.status);
   const d = await r.json();
   return d.values || [];
 }
 
 async function sheetAppend(range, rows) {
-  if (!isAuthed()) throw new Error('인증 필요');
+  const token = await getAccessToken();
   const url = `https://sheets.googleapis.com/v4/spreadsheets/${state.sheetId}/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED`;
   const r = await fetch(url, {
     method: 'POST',
-    headers: { Authorization: 'Bearer ' + state.accessToken, 'Content-Type': 'application/json' },
+    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
     body: JSON.stringify({ values: rows }),
   });
-  if (!r.ok) throw new Error('Sheet write failed: ' + r.status);
+  if (!r.ok) throw new Error('Sheet 쓰기 실패: ' + r.status);
   return r.json();
 }
 
 async function sheetCreate(title) {
-  if (!isAuthed()) throw new Error('인증 필요');
+  const token = await getAccessToken();
   const url = `https://sheets.googleapis.com/v4/spreadsheets/${state.sheetId}:batchUpdate`;
   const r = await fetch(url, {
     method: 'POST',
-    headers: { Authorization: 'Bearer ' + state.accessToken, 'Content-Type': 'application/json' },
+    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
     body: JSON.stringify({ requests: [{ addSheet: { properties: { title } } }] }),
   });
   return r.ok;
@@ -704,30 +722,35 @@ function applyHistoryFilter() {
 
 function renderSettings() {
   const root = document.getElementById('tab-settings');
+  const saEmail = state.saKey && state.saKey.client_email ? state.saKey.client_email : '';
   root.innerHTML = `
     <div class="card">
       <h2>Google Sheets 연결</h2>
       <div class="field">
-        <label>Google OAuth Client ID</label>
-        <input type="text" id="set-client-id" value="${escapeAttr(state.clientId)}" placeholder="xxxxxxxxxxxx.apps.googleusercontent.com">
+        <label>Service Account JSON</label>
+        <textarea id="set-sa-json" rows="6" placeholder='{"type":"service_account","project_id":"...","client_email":"xxx@xxx.iam.gserviceaccount.com","private_key":"-----BEGIN PRIVATE KEY-----..."}'
+          style="background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:8px 10px;font-size:12px;width:100%;font-family:ui-monospace,monospace;resize:vertical">${escapeAttr(state.saKeyRaw)}</textarea>
+        ${saEmail ? `<div style="margin-top:6px;font-size:11px;color:var(--text-dim);font-family:ui-monospace,monospace">📧 ${escapeHtml(saEmail)}</div>` : ''}
       </div>
       <div class="field">
         <label>Spreadsheet ID</label>
-        <input type="text" id="set-sheet-id" value="${escapeAttr(state.sheetId)}" placeholder="1AbCdEf...">
+        <input type="text" id="set-sheet-id" value="${escapeAttr(state.sheetId)}" placeholder="구글시트 URL의 /d/와 /edit 사이 문자열">
       </div>
       <div class="field">
         <label>초기 자본 (KRW)</label>
         <input type="number" id="set-initial-cash" value="${state.initialCash || ''}" placeholder="예: 10000000">
       </div>
-      <div style="display:flex;gap:8px;margin-top:12px">
+      <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
         <button class="icon-btn primary" onclick="saveSettings()">저장</button>
+        <button class="icon-btn" onclick="testConnection()">🔌 연결 테스트</button>
         <button class="icon-btn" onclick="ensureTabs()">필수 탭 생성</button>
       </div>
       <div style="margin-top:14px;padding:10px;background:var(--bg);border-radius:6px;font-size:12px;color:var(--text-dim);line-height:1.7">
-        <div>📋 시트 탭 구성:</div>
+        <div><b>📋 시트 탭 구성</b></div>
         <div>• <b>${TX_TAB}</b>: 매매일, 종목코드, 체결단가, 체결수량, 수수료, 정산금액</div>
         <div>• <b>${NAMES_TAB}</b>: 종목코드, 종목명 (선택)</div>
         <div>• <b>${CONFIG_TAB}</b>: A1=initial_cash, B1=금액 (선택)</div>
+        <div style="margin-top:6px"><b>⚠️ 시트 공유 필수</b>: 위 시트를 ${saEmail ? '<code>' + escapeHtml(saEmail) + '</code>' : 'service account 이메일'}에 편집자로 공유해야 합니다.</div>
       </div>
     </div>
 
@@ -748,9 +771,10 @@ function renderSettings() {
     <div class="card" style="margin-top:12px">
       <h2>도움말</h2>
       <div style="font-size:13px;color:var(--text-dim);line-height:1.8">
+        <div>• 인증: Service Account (JWT 자동 갱신)</div>
         <div>• 시세 출처: 네이버 금융 (CORS 프록시 경유)</div>
-        <div>• 데이터 저장: Google Sheet (원본) + 로컬 캐시</div>
-        <div>• 손익 계산: FIFO 방식, 수수료(거래세 포함)는 정산금액에 이미 반영</div>
+        <div>• 저장: Google Sheet (원본) + 로컬 캐시</div>
+        <div>• 손익: FIFO 방식, 수수료/세금은 정산금액에 이미 반영</div>
         <div>• 종목코드는 'A' 접두사 포함 (예: A005930)</div>
       </div>
     </div>
@@ -759,32 +783,70 @@ function renderSettings() {
 
 // ============ ACTIONS ============
 function saveSettings() {
-  state.clientId = document.getElementById('set-client-id').value.trim();
+  const rawJson = document.getElementById('set-sa-json').value.trim();
+  if (rawJson) {
+    try {
+      const parsed = JSON.parse(rawJson);
+      if (!parsed.client_email || !parsed.private_key) {
+        toast('JSON에 client_email 또는 private_key가 없습니다', 'error');
+        return;
+      }
+      state.saKey = parsed;
+      state.saKeyRaw = rawJson;
+    } catch (e) {
+      toast('JSON 파싱 실패: ' + e.message, 'error');
+      return;
+    }
+  }
   state.sheetId = document.getElementById('set-sheet-id').value.trim();
   state.initialCash = Number(document.getElementById('set-initial-cash').value) || 0;
+  // Reset cached token since key may have changed
+  state.accessToken = null; state.tokenExpiry = 0;
   saveLocal();
-  initAuth();
-  toast('저장됨', 'success');
+  updateConnStatus(false);
+  toast('저장됨. 연결 테스트를 눌러보세요.', 'success');
+  renderSettings();
+}
+
+async function testConnection() {
+  if (!isConfigured()) { toast('JSON과 Sheet ID를 먼저 저장하세요', 'error'); return; }
+  try {
+    toast('연결 시도 중...');
+    await getAccessToken();
+    // Try reading the sheet metadata to verify access
+    const r = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${state.sheetId}?fields=properties.title`, {
+      headers: { Authorization: 'Bearer ' + state.accessToken }
+    });
+    if (!r.ok) {
+      if (r.status === 403) throw new Error('403 권한 없음. 시트를 서비스 계정 이메일에 공유했는지 확인하세요.');
+      if (r.status === 404) throw new Error('404 시트를 찾을 수 없습니다. Sheet ID를 확인하세요.');
+      throw new Error('시트 접근 실패: ' + r.status);
+    }
+    const d = await r.json();
+    toast(`✓ 연결 성공: ${d.properties.title}`, 'success');
+    updateConnStatus(true);
+  } catch (e) {
+    toast('실패: ' + e.message, 'error');
+    updateConnStatus(false);
+  }
 }
 
 async function ensureTabs() {
-  if (!isAuthed()) { toast('먼저 로그인하세요', 'error'); return; }
-  for (const tab of [TX_TAB, NAMES_TAB, CONFIG_TAB, DAILY_TAB]) {
-    const ok = await sheetCreate(tab);
-    // ignore "already exists" failures
+  if (!isConfigured()) { toast('먼저 JSON과 Sheet ID를 저장하세요', 'error'); return; }
+  try {
+    for (const tab of [TX_TAB, NAMES_TAB, CONFIG_TAB, DAILY_TAB]) {
+      try { await sheetCreate(tab); } catch (e) {}
+    }
+    try { await sheetAppend(`${TX_TAB}!A1`, [['매매일', '종목코드', '체결단가', '체결수량', '수수료', '정산금액']]); } catch (e) {}
+    try { await sheetAppend(`${NAMES_TAB}!A1`, [['종목코드', '종목명']]); } catch (e) {}
+    toast('탭 확인/생성 완료', 'success');
+  } catch (e) {
+    toast('실패: ' + e.message, 'error');
   }
-  // Write headers
-  try {
-    await sheetAppend(`${TX_TAB}!A1`, [['매매일', '종목코드', '체결단가', '체결수량', '수수료', '정산금액']]);
-  } catch (e) {}
-  try {
-    await sheetAppend(`${NAMES_TAB}!A1`, [['종목코드', '종목명']]);
-  } catch (e) {}
-  toast('탭 확인 완료', 'success');
 }
 
 async function refreshTransactions() {
-  if (!isAuthed()) { handleAuth(); return; }
+  if (!isConfigured()) { toast('설정에서 JSON과 Sheet ID를 입력하세요', 'error'); switchTab('settings'); return; }
   try {
     toast('거래내역 로딩 중...');
     state.transactions = await loadTransactions();
@@ -816,7 +878,7 @@ async function refreshPrices() {
 }
 
 async function refreshAll() {
-  if (!isAuthed()) { handleAuth(); return; }
+  if (!isConfigured()) { toast('설정에서 JSON과 Sheet ID를 입력하세요', 'error'); switchTab('settings'); return; }
   await refreshTransactions();
   await refreshPrices();
 }
@@ -826,6 +888,8 @@ function clearCache() {
   localStorage.removeItem(STORAGE_KEY);
   state.transactions = []; state.prices = {}; state.names = {};
   state.accessToken = null; state.tokenExpiry = 0;
+  state.saKey = null; state.saKeyRaw = ''; state.sheetId = ''; state.initialCash = 0;
+  updateConnStatus(false);
   toast('캐시 삭제됨', 'success');
   switchTab('settings');
 }
@@ -841,13 +905,13 @@ function escapeAttr(s) { return escapeHtml(s); }
 loadLocal();
 window.addEventListener('load', () => {
   switchTab('overview');
-  if (state.clientId) initAuth();
-  if (isAuthed()) {
-    document.getElementById('auth-btn').textContent = '✓ 로그인됨';
-    // Auto-refresh prices on load (transactions are cached)
-    if (state.transactions.length > 0) {
-      setTimeout(() => refreshPrices(), 500);
-    }
+  updateConnStatus(false);
+  // Auto-load on startup if configured
+  if (isConfigured() && state.transactions.length > 0) {
+    // We have cached data — just refresh prices in background
+    setTimeout(() => refreshPrices().catch(() => {}), 500);
+  } else if (isConfigured()) {
+    setTimeout(() => refreshAll().catch(() => {}), 500);
   }
 });
 </script>
