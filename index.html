@@ -1078,50 +1078,92 @@ function applyHistoryFilter() {
 }
 
 // ============ INPUT (Sheet Append) ============
-// Paste new transactions and append to the Sheet.
-// Supported delimiters: tab, comma, or 2+ spaces. Columns expected (in order):
-//   date · code · price · qty(signed) · fees · settle · [split optional]
+// v4 format:
+//   #계정명 YYMMDD              ← header sets date for following rows; can appear multiple times
+//   종목명,순번,가격(만원),수량   ← data row; qty signed (+매수 / −매도)
+// Looks up code from kr_names by name. Estimates fees/거래세 from typical KR rates.
 function parseInputRows(text) {
   const rows = [];
   const errors = [];
-  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-  lines.forEach((line, idx) => {
-    if (line.startsWith('#') || line.startsWith('//')) return;  // comments
-    // Auto-detect delimiter
-    let parts;
-    if (line.includes('\t')) parts = line.split('\t');
-    else if (line.includes(',')) parts = line.split(',');
-    else parts = line.split(/\s{2,}/);
-    parts = parts.map(p => p.trim());
-    if (parts.length < 6) {
-      errors.push(`${idx + 1}행: 컬럼 부족 (${parts.length}개, 최소 6개 필요)`);
-      return;
-    }
-    // Skip header rows
-    if (/매매일|date/i.test(parts[0]) && /종목|code/i.test(parts[1])) return;
+  let currentDate = null;
+  let currentAccount = null;
 
-    const [dateRaw, codeRaw, priceRaw, qtyRaw, feesRaw, settleRaw, splitRaw] = parts;
-    const date = parseDate(dateRaw);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      errors.push(`${idx + 1}행: 날짜 형식 오류 "${dateRaw}"`);
+  // Build name → code reverse lookup (case-insensitive, whitespace-stripped)
+  const nameToCode = {};
+  for (const [code, name] of Object.entries(state.names || {})) {
+    if (!name) continue;
+    const key = String(name).trim().replace(/\s+/g, '').toLowerCase();
+    nameToCode[key] = code;
+  }
+
+  const lines = text.split(/\r?\n/);
+  lines.forEach((rawLine, idx) => {
+    const lineNum = idx + 1;
+    const line = rawLine.trim();
+    if (!line) return;
+
+    // Header: #account YYMMDD (or YYYYMMDD)
+    if (line.startsWith('#')) {
+      const m = line.match(/^#\s*(\S+)\s+(\d{6,8})\s*$/);
+      if (m) {
+        currentAccount = m[1];
+        const d = m[2];
+        currentDate = d.length === 6
+          ? `20${d.slice(0, 2)}-${d.slice(2, 4)}-${d.slice(4, 6)}`
+          : `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`;
+      } else {
+        errors.push(`${lineNum}행: 헤더 형식 오류 "${line}" (예: #삼성국내 260514)`);
+      }
       return;
     }
-    let code = String(codeRaw).trim().toUpperCase();
-    if (/^\d{6}$/.test(code)) code = 'A' + code;  // pad missing A prefix
-    if (!/^A[\dA-Z]{6}$/.test(code)) {
-      errors.push(`${idx + 1}행: 종목코드 형식 오류 "${codeRaw}"`);
+
+    if (!currentDate) {
+      errors.push(`${lineNum}행: 헤더(#계정 YYMMDD) 먼저 필요`);
       return;
     }
-    const price = parseNum(priceRaw);
-    const qty = parseNum(qtyRaw);
-    const fees = parseNum(feesRaw);
-    const settle = parseNum(settleRaw);
-    if (!price || !qty) {
-      errors.push(`${idx + 1}행: 가격/수량이 0 또는 누락 "${priceRaw}/${qtyRaw}"`);
+
+    const parts = line.split(',').map(p => p.trim());
+    if (parts.length < 4) {
+      errors.push(`${lineNum}행: 컬럼 부족 (${parts.length}개, 4개 필요: 종목명,순번,가격(만),수량)`);
       return;
     }
-    rows.push([date, code, price, qty, fees, settle, splitRaw || '']);
+
+    const [name, seqRaw, priceManRaw, qtyRaw] = parts;
+    const priceMan = parseFloat(priceManRaw);
+    const qty = parseFloat(qtyRaw);
+
+    if (!name) { errors.push(`${lineNum}행: 종목명 없음`); return; }
+    if (isNaN(priceMan) || priceMan <= 0) {
+      errors.push(`${lineNum}행: 가격(만원) 형식 오류 "${priceManRaw}"`); return;
+    }
+    if (isNaN(qty) || qty === 0) {
+      errors.push(`${lineNum}행: 수량 형식 오류 "${qtyRaw}"`); return;
+    }
+
+    const nameKey = name.trim().replace(/\s+/g, '').toLowerCase();
+    const code = nameToCode[nameKey];
+    if (!code) {
+      errors.push(`${lineNum}행: 종목명 "${name}" 코드 없음 (kr_names 탭에 등록 필요)`);
+      return;
+    }
+
+    // Estimate fees (broker ~0.014%, KR trading tax 0.18% on sells)
+    const price = Math.round(priceMan * 10000);
+    const isBuy = qty > 0;
+    const gross = price * Math.abs(qty);
+    const brokerage = Math.round(gross * 0.00014);
+    const tradingTax = isBuy ? 0 : Math.round(gross * 0.0018);
+    const fees = brokerage + tradingTax;
+    const settle = isBuy ? gross + fees : gross - fees;
+
+    rows.push([currentDate, code, price, qty, fees, settle, '']);
   });
+
+  // Warn if no rows parsed at all
+  if (rows.length === 0 && errors.length === 0 && text.trim()) {
+    errors.push('파싱된 행 없음 - 형식을 확인하세요');
+  }
+
   return { rows, errors };
 }
 
@@ -1158,19 +1200,25 @@ function renderInput() {
     <div class="card">
       <h2>📝 신규 거래내역 입력</h2>
       <div style="font-size:12px;color:var(--text-dim);line-height:1.7;margin-bottom:10px">
-        새 거래내역을 붙여넣으면 <code>${TX_TAB}</code> 시트에 append합니다.
-        <br>형식: 탭 / 콤마 / 다중공백 구분, 6~7 컬럼.
+        새 거래내역을 붙여넣으면 <code>${TX_TAB}</code> 시트에 append합니다. <b>v4 동일 포맷.</b>
       </div>
-      <div style="background:var(--bg);padding:10px;border-radius:6px;font-size:11px;color:var(--text-dim);font-family:ui-monospace,monospace;line-height:1.6;margin-bottom:10px">
-        매매일&nbsp;&nbsp;종목코드&nbsp;&nbsp;체결단가&nbsp;&nbsp;체결수량&nbsp;&nbsp;수수료&nbsp;&nbsp;정산금액&nbsp;&nbsp;<span class="text-faint">[split]</span>
+      <div style="background:var(--bg);padding:10px;border-radius:6px;font-size:11px;color:var(--text-dim);font-family:ui-monospace,monospace;line-height:1.7;margin-bottom:10px">
+        <b style="color:var(--accent)">#계정명 YYMMDD</b>&nbsp;&nbsp;<span class="text-faint">← 헤더 (이후 행의 날짜)</span>
+        <br>종목명,&nbsp;순번,&nbsp;가격(만원),&nbsp;수량
+        <br>종목명,&nbsp;순번,&nbsp;가격(만원),&nbsp;수량
         <br><br>예시:
-        <br>2026-05-14&nbsp;&nbsp;A005930&nbsp;&nbsp;143700&nbsp;&nbsp;10&nbsp;&nbsp;87&nbsp;&nbsp;-1437087
-        <br>2026-05-14&nbsp;&nbsp;A010120&nbsp;&nbsp;180400&nbsp;&nbsp;-5&nbsp;&nbsp;1500&nbsp;&nbsp;900500
+        <br>#삼성국내&nbsp;260514
+        <br>삼성SDI,1,17.452,1
+        <br>LS일렉트릭,2,18.04,3
+        <br>삼성전자,3,14.37,-5
+        <br><br>#삼성국내&nbsp;260515
+        <br>...
         <br><br><span class="text-faint">• 수량 부호: 매수 +, 매도 −</span>
-        <br><span class="text-faint">• 정산금액 부호: 현금흐름 (매수 −, 매도 +) 또는 절댓값 모두 허용</span>
-        <br><span class="text-faint">• 종목코드: A 접두사 없으면 자동 추가 (예: 005930 → A005930)</span>
+        <br><span class="text-faint">• 가격은 만원 단위 (예: 17.452 = 174,520원)</span>
+        <br><span class="text-faint">• 종목명은 <code>kr_names</code> 탭에 등록된 이름과 일치해야 함</span>
+        <br><span class="text-faint">• 수수료/거래세는 자동 추정 (수수료 0.014% + 매도 거래세 0.18%)</span>
       </div>
-      <textarea id="input-textarea" rows="10" style="width:100%;padding:10px;font-family:ui-monospace,monospace;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;resize:vertical" placeholder="여기에 붙여넣기..."></textarea>
+      <textarea id="input-textarea" rows="10" style="width:100%;padding:10px;font-family:ui-monospace,monospace;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;resize:vertical" placeholder="#삼성국내 260514&#10;삼성SDI,1,17.452,1"></textarea>
       <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
         <button class="icon-btn" onclick="previewInput()">👁️ 미리보기</button>
         <button class="icon-btn primary" onclick="commitInput()" ${parsed.rows.length === 0 ? 'disabled' : ''}>💾 Sheet에 추가 (${parsed.rows.length}건)</button>
