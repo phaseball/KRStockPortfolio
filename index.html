@@ -73,18 +73,19 @@
     padding: 16px; box-shadow: var(--shadow);
   }
   .cards-grid {
-    display: grid; grid-template-columns: repeat(2, 1fr);
-    gap: 12px; margin-bottom: 16px;
+    display: grid; grid-template-columns: repeat(4, 1fr);
+    gap: 10px; margin-bottom: 16px;
   }
-  .summary-card { padding: 14px 16px; }
-  .summary-card .label { font-size: 12px; color: var(--text-dim); margin-bottom: 6px; }
-  .summary-card .value { font-size: 20px; font-weight: 700; letter-spacing: -0.3px; }
-  .summary-card .sub { font-size: 11px; color: var(--text-dim); margin-top: 2px; font-family: ui-monospace, monospace; }
-  .summary-card .row2 { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-  .summary-card .row2 .meta { font-size: 10px; color: var(--text-faint); font-family: ui-monospace, monospace; line-height: 1.6; text-align: right; white-space: nowrap; }
-  .summary-card .pair { display: flex; gap: 20px; align-items: baseline; margin-top: 4px; }
-  .summary-card .pair .item .lbl { font-size: 10px; color: var(--text-faint); }
-  .summary-card .pair .item .v { font-size: 16px; font-weight: 700; }
+  .summary-card { padding: 12px 14px; min-width: 0; }
+  .summary-card .label { font-size: 11px; color: var(--text-dim); margin-bottom: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .summary-card .value { font-size: 19px; font-weight: 700; letter-spacing: -0.3px; white-space: nowrap; }
+  .summary-card .sub { font-size: 12px; color: var(--text-dim); margin-top: 4px; font-family: ui-monospace, monospace; }
+  /* meta lines (평가/매수, 자산/초기): stacked below value, brighter and slightly larger */
+  .summary-card .row2 { display: block; margin-top: 4px; }
+  .summary-card .row2 .meta { font-size: 12px; color: var(--text-dim); font-family: ui-monospace, monospace; line-height: 1.6; margin-top: 6px; text-align: left; }
+  .summary-card .pair { display: flex; gap: 14px; align-items: baseline; margin-top: 6px; flex-wrap: wrap; }
+  .summary-card .pair .item .lbl { font-size: 11px; color: var(--text-dim); }
+  .summary-card .pair .item .v { font-size: 16px; font-weight: 700; white-space: nowrap; }
 
   /* Broker switcher (4 sub-tabs in 개요) */
   .broker-tabs { display: flex; gap: 2px; margin-bottom: 14px; border-bottom: 1px solid var(--border); }
@@ -115,6 +116,10 @@
   .hold-cell { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   .hold-cell .top { font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .hold-cell .bot { font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* Price cell: 현재가 prominent, 평단 small dim, (changes) small inline */
+  .hold-cell-price .price-now { font-size: 15px; font-weight: 700; white-space: nowrap; }
+  .hold-cell-price .price-now .changes { font-size: 11px; font-weight: 400; }
+  .hold-cell-price .price-avg { font-size: 10px; color: var(--text-faint); white-space: nowrap; margin-top: 2px; }
   .holding-name { font-weight: 600; font-size: 14px; }
   .holding-code { font-size: 11px; color: var(--text-faint); font-family: ui-monospace, monospace; }
 
@@ -173,6 +178,9 @@
   .back-btn { background: transparent; border: 0; color: var(--accent); cursor: pointer; font-size: 14px; margin-bottom: 12px; padding: 4px 0; }
   .back-btn:hover { text-decoration: underline; }
 
+  @media (max-width: 900px) {
+    .cards-grid { grid-template-columns: repeat(2, 1fr); }
+  }
   @media (max-width: 640px) {
     .summary-card .value { font-size: 17px; }
     .cards-grid { grid-template-columns: 1fr; }
@@ -191,7 +199,7 @@
   <div style="flex:1;min-width:0">
     <div class="header-title">📈 국내주식 포트폴리오</div>
     <div style="font-size:11px;color:var(--text-faint);margin-top:2px;font-family:ui-monospace,monospace">
-      <span id="verInfo">v —</span> · <span id="priceInfo">시세 —</span>
+      <span id="verInfo">html-—</span> · <span id="priceInfo">시세-—</span>
     </div>
   </div>
   <div class="header-actions">
@@ -225,7 +233,7 @@ const NAMES_TAB = 'kr_names';
 const CONFIG_TAB = 'config_kr';
 const DAILY_TAB = 'daily_value_kr';
 // Build timestamp — bump when shipping a new version
-const BUILD_TIME = '0514-15:30';
+const BUILD_TIME = '0514-15:12:54';
 
 // KR brokerage fee model (2026, Samsung 증권 default; applied per row in input parser)
 //   매수/매도 브로커리지: 0.0150% of gross
@@ -313,15 +321,14 @@ function getInitialCashForBroker(broker) {
 
 // ============ UTILS ============
 // All numeric output: 만(萬, 10,000) unit, NO thousand-separator commas.
-// Adaptive variant: magnitude-scaled decimals + "만" suffix (totals, P/L).
+// 1 decimal everywhere unless value < 1만 (then 2 decimals for precision).
 function fmtMan(n) {
   if (n === null || n === undefined || isNaN(n)) return '—';
   const man = n / 10000;
   const abs = Math.abs(man);
   const sign = man < 0 ? '-' : '';
   let s;
-  if (abs >= 1000) s = Math.round(abs).toString();
-  else if (abs >= 10) s = abs.toFixed(1);
+  if (abs >= 1) s = abs.toFixed(1);
   else s = abs.toFixed(2);
   return sign + s + '만';
 }
@@ -428,7 +435,7 @@ function updateConnStatus(connected) {
 
 function updateHeaderInfo() {
   const ver = document.getElementById('verInfo');
-  if (ver) ver.textContent = 'v' + BUILD_TIME;
+  if (ver) ver.textContent = 'html-' + BUILD_TIME;
   const pf = document.getElementById('priceInfo');
   if (pf) {
     if (state.lastPriceFetchAt) {
@@ -437,9 +444,10 @@ function updateHeaderInfo() {
       const dd = String(d.getDate()).padStart(2, '0');
       const hh = String(d.getHours()).padStart(2, '0');
       const mi = String(d.getMinutes()).padStart(2, '0');
-      pf.textContent = `시세 ${mm}${dd}-${hh}:${mi}`;
+      const ss = String(d.getSeconds()).padStart(2, '0');
+      pf.textContent = `시세-${mm}${dd}-${hh}:${mi}:${ss}`;
     } else {
-      pf.textContent = '시세 —';
+      pf.textContent = '시세-—';
     }
   }
 }
@@ -939,7 +947,7 @@ function renderOverview() {
     ? `<div class="empty"><div class="emoji">💼</div><div>현재 보유 종목 없음</div></div>`
     : `<div class="hold-hdr">
           <div>종목 · 수량</div>
-          <div>평단 / 현재가 (어제/1주)</div>
+          <div>현재가 (d/1w) / 평단</div>
           <div>평가손익 / 수익률</div>
           <div>평가금액 / 매수금액</div>
           <div>실현 YTD / total</div>
@@ -959,21 +967,20 @@ function renderOverview() {
               <div class="top">${escapeHtml(name)} <span class="text-faint" style="font-size:11px;font-weight:400">${h.qty.toString()}주</span></div>
               <div class="bot" style="font-family:ui-monospace,monospace">${code}</div>
             </div>
-            <div class="hold-cell">
-              <div class="top">${fmtMan2(h.avgCost)}</div>
-              <div class="bot">${curPrice ? fmtMan2(curPrice) : '—'}${fmtChangePcts(priceObj)}</div>
+            <div class="hold-cell hold-cell-price">
+              <div class="price-now">${curPrice ? fmtMan2(curPrice) : '—'}<span class="changes">${fmtChangePcts(priceObj)}</span></div>
+              <div class="price-avg">평단 ${fmtMan2(h.avgCost)}</div>
             </div>
             <div class="hold-cell">
               <div class="top ${plClass(upl)}">${upl !== null ? fmtManSigned(upl) : '—'}</div>
-              <div class="bot ${plClass(uplPct)}">${uplPct !== null ? fmtPct(uplPct) : '—'}</div>
+              <div class="bot ${plClass(uplPct)}">${uplPct !== null ? '(' + fmtPct(uplPct) + ')' : '—'}</div>
             </div>
             <div class="hold-cell">
               <div class="top">${value !== null ? fmtMan(value) : fmtMan(lineCost)}</div>
               <div class="bot">${fmtMan(lineCost)}</div>
             </div>
             <div class="hold-cell">
-              <div class="top ${plClass(h.realizedPLThisYear)}">${fmtManSigned(h.realizedPLThisYear)}</div>
-              <div class="bot ${plClass(h.realizedPL)}">${fmtManSigned(h.realizedPL)} <span class="text-faint">tot</span></div>
+              <div class="top" style="white-space:nowrap"><span class="${plClass(h.realizedPLThisYear)}">${fmtManSigned(h.realizedPLThisYear)}</span> <span class="text-faint">/</span> <span class="${plClass(h.realizedPL)}">${fmtManSigned(h.realizedPL)}</span></div>
             </div>
           </div>
         `;
