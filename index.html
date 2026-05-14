@@ -292,7 +292,7 @@ let state = {
   activeBroker: '삼성국내',  // 'total' or one of BROKERS
   selectedCode: null,
   showTotalChart: false,
-  chartPeriod: 'total',  // 'total' | '1y' | '6m' | '3m'
+  chartPeriod: '2026',  // 'total' | '1y' | '6m' | '3m' | '2025' | '2026'
   chartScale: 'log',     // 'log' | 'linear'
   chartBenches: { '^KS11': true, '091160.KS': true, '^KQ11': true },  // KOSPI / KODEX반도체 / KOSDAQ
   currentTab: 'overview',
@@ -1415,26 +1415,26 @@ function renderChartSummary(periodSeries) {
     return;
   }
   
-  // Build simple text summary (like v4)
+  // Build compact summary like v4: "PERIOD (Nd): start → end, +X.X% (+₩change)"
   const buildLine = (label, daily) => {
-    if (!daily || !daily.length) return `<div style="color:var(--text-faint)">${label}: 데이터 없음</div>`;
+    if (!daily || !daily.length) return `<div style="color:var(--text-faint);font-size:13px">${label}: 데이터 없음</div>`;
     const start = daily[0].totalValue;
     const end = daily[daily.length-1].totalValue;
     const diff = end - start;
     const pct = start > 0 ? (end - start) / start : null;
     const cls = plClass(diff);
-    const dateRange = `${daily[0].date} → ${daily[daily.length-1].date}`;
-    return `<div style="margin-bottom:6px">
-      <b>${label}</b> <span class="text-faint" style="font-size:11px">(${dateRange})</span>: 
+    const days = daily.length;
+    return `<div style="margin-bottom:4px;font-size:13px">
+      <b>${label}</b> <span class="text-faint" style="font-size:11px">(${days}d)</span>: 
       ₩${fmtMan(start)} → ₩${fmtMan(end)}, 
-      <span class="${cls}">${fmtManSigned(diff)}</span>
-      ${pct !== null ? `<span class="${cls}" style="font-size:12px">(${fmtPct(pct)})</span>` : ''}
+      <span class="${cls}">${fmtPct(pct)}</span>
+      <span class="${cls}" style="font-size:12px">(${fmtManSigned(diff)})</span>
     </div>`;
   };
   
   const yearSeries = (y) => _cachedDaily.filter(d => d.date >= `${y}-01-01` && d.date <= `${y}-12-31`);
   el.innerHTML = `
-    <div class="card" style="margin-top:8px;padding:14px;font-size:13px;line-height:1.8">
+    <div class="card" style="margin-top:8px;padding:12px 14px;font-size:13px;line-height:1.7">
       ${buildLine(state.chartPeriod.toUpperCase(), periodSeries)}
       ${buildLine('2025', yearSeries('2025'))}
       ${buildLine('2026', yearSeries('2026'))}
