@@ -1133,7 +1133,7 @@ function toggleBench(code, on) { state.chartBenches[code] = on; saveLocal(); dra
 function renderChartControls() {
   const el = document.getElementById('chart-controls-host');
   if (!el) return;
-  const periods = ['total', '1y', '6m', '3m', '2026', '2025'];
+  const periods = ['total', '1y', '6m', '3m', '2025', '2026'];
   el.innerHTML = `
     <div><span class="lbl">기간</span>
       ${periods.map(p => `<button class="cbtn ${state.chartPeriod===p?'on':''}" onclick="setChartPeriod('${p}')">${p === 'total' ? 'TOTAL' : p.toUpperCase()}</button>`).join('')}
@@ -1267,18 +1267,42 @@ async function drawTotalChart() {
     return;
   }
 
-  // Normalize: base = first value of each series to 100
+  // Normalize: base = previous day's end value (or first value if no previous day)
   const labels = series.map(d => d.date);
-  const baseValue = series[0].totalValue || 1;
+  let baseValue = series[0].totalValue || 1;
+  // For period charts (not 'total'), use the last value from the day before the period start
+  if (state.chartPeriod !== 'total') {
+    const firstDate = series[0].date;
+    const firstDateObj = new Date(firstDate + 'T00:00:00');
+    const prevDateObj = new Date(firstDateObj);
+    prevDateObj.setDate(prevDateObj.getDate() - 1);
+    const prevDate = prevDateObj.toISOString().split('T')[0];
+    const prevDay = _cachedDaily.find(d => d.date === prevDate);
+    if (prevDay && prevDay.totalValue) {
+      baseValue = prevDay.totalValue;
+    }
+  }
   const portfolioData = series.map(d => d.totalValue / baseValue * 100);
 
   const benchDatasets = [];
   for (const b of enabledBenches) {
     const hist = _cachedBench[b.code] || {};
     const startDate = series[0].date;
-    const histDates = Object.keys(hist).filter(d => d >= startDate).sort();
-    if (!histDates.length) continue;
-    const benchBase = hist[histDates[0]];
+    // For benchmarks, also use previous day if available (to match portfolio base)
+    let benchBase = null;
+    if (state.chartPeriod !== 'total') {
+      const firstDateObj = new Date(startDate + 'T00:00:00');
+      const prevDateObj = new Date(firstDateObj);
+      prevDateObj.setDate(prevDateObj.getDate() - 1);
+      const prevDate = prevDateObj.toISOString().split('T')[0];
+      if (hist[prevDate] != null) benchBase = hist[prevDate];
+    }
+    // Fallback to first date in period if no previous day
+    if (benchBase === null) {
+      const histDates = Object.keys(hist).filter(d => d >= startDate).sort();
+      if (!histDates.length) continue;
+      benchBase = hist[histDates[0]];
+    }
     let lastVal = null;
     const data = [];
     const rawData = [];   // parallel array of raw closes for tooltip
@@ -1386,31 +1410,34 @@ async function drawTotalChart() {
 function renderChartSummary(periodSeries) {
   const el = document.getElementById('chartSummary');
   if (!el) return;
-  const buildRow = (label, daily) => {
-    if (!daily || !daily.length) return `<tr><td>${label}</td><td colspan="3" class="text-faint">데이터 없음</td></tr>`;
+  if (!periodSeries || !periodSeries.length) {
+    el.innerHTML = '<div class="card" style="margin-top:8px;padding:12px;color:var(--text-faint)">데이터 없음</div>';
+    return;
+  }
+  
+  // Build simple text summary (like v4)
+  const buildLine = (label, daily) => {
+    if (!daily || !daily.length) return `<div style="color:var(--text-faint)">${label}: 데이터 없음</div>`;
     const start = daily[0].totalValue;
     const end = daily[daily.length-1].totalValue;
     const diff = end - start;
     const pct = start > 0 ? (end - start) / start : null;
     const cls = plClass(diff);
-    return `<tr>
-      <td><b>${label}</b> <span class="text-faint" style="font-size:10px">${daily[0].date}→${daily[daily.length-1].date}</span></td>
-      <td>₩${fmtMan(start)}</td>
-      <td>₩${fmtMan(end)}</td>
-      <td class="${cls}">${fmtManSigned(diff)} ${pct !== null ? `<span style="font-size:11px">(${fmtPct(pct)})</span>` : ''}</td>
-    </tr>`;
+    const dateRange = `${daily[0].date} → ${daily[daily.length-1].date}`;
+    return `<div style="margin-bottom:6px">
+      <b>${label}</b> <span class="text-faint" style="font-size:11px">(${dateRange})</span>: 
+      ₩${fmtMan(start)} → ₩${fmtMan(end)}, 
+      <span class="${cls}">${fmtManSigned(diff)}</span>
+      ${pct !== null ? `<span class="${cls}" style="font-size:12px">(${fmtPct(pct)})</span>` : ''}
+    </div>`;
   };
+  
   const yearSeries = (y) => _cachedDaily.filter(d => d.date >= `${y}-01-01` && d.date <= `${y}-12-31`);
   el.innerHTML = `
-    <div class="card" style="padding:0;margin-top:8px">
-      <table class="history-table" style="margin:0">
-        <thead><tr><th>구간</th><th>시작</th><th>끝</th><th>변동</th></tr></thead>
-        <tbody>
-          ${buildRow(`선택 (${state.chartPeriod.toUpperCase()})`, periodSeries)}
-          ${buildRow('2026', yearSeries('2026'))}
-          ${buildRow('2025', yearSeries('2025'))}
-        </tbody>
-      </table>
+    <div class="card" style="margin-top:8px;padding:14px;font-size:13px;line-height:1.8">
+      ${buildLine(state.chartPeriod.toUpperCase(), periodSeries)}
+      ${buildLine('2025', yearSeries('2025'))}
+      ${buildLine('2026', yearSeries('2026'))}
     </div>
   `;
 }
