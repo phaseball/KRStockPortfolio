@@ -73,29 +73,40 @@
     padding: 16px; box-shadow: var(--shadow);
   }
   .cards-grid {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    display: grid; grid-template-columns: repeat(2, 1fr);
     gap: 12px; margin-bottom: 16px;
   }
   .summary-card { padding: 14px 16px; }
   .summary-card .label { font-size: 12px; color: var(--text-dim); margin-bottom: 6px; }
   .summary-card .value { font-size: 20px; font-weight: 700; letter-spacing: -0.3px; }
-  .summary-card .sub { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+  .summary-card .sub { font-size: 11px; color: var(--text-dim); margin-top: 2px; font-family: ui-monospace, monospace; }
+  .summary-card .row2 { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .summary-card .row2 .meta { font-size: 10px; color: var(--text-faint); font-family: ui-monospace, monospace; line-height: 1.6; text-align: right; white-space: nowrap; }
+  .summary-card .pair { display: flex; gap: 20px; align-items: baseline; margin-top: 4px; }
+  .summary-card .pair .item .lbl { font-size: 10px; color: var(--text-faint); }
+  .summary-card .pair .item .v { font-size: 16px; font-weight: 700; }
 
-  /* Holdings list */
+  /* Holdings header + row: 5 columns × 2 rows */
+  .hold-hdr {
+    display: grid;
+    grid-template-columns: 1.6fr 1.1fr 1.1fr 1.1fr 1.2fr;
+    gap: 10px; padding: 6px 14px; font-size: 10px; color: var(--text-faint);
+    border-bottom: 1px solid var(--border);
+    background: var(--bg); position: sticky; top: 0; z-index: 1;
+  }
   .holding-row {
     display: grid;
-    grid-template-columns: 1fr auto;
-    gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--border);
-    cursor: pointer; transition: background 0.1s;
+    grid-template-columns: 1.6fr 1.1fr 1.1fr 1.1fr 1.2fr;
+    gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border);
+    cursor: pointer; transition: background 0.1s; align-items: center;
   }
   .holding-row:hover { background: rgba(255,255,255,0.02); }
   .holding-row:last-child { border-bottom: 0; }
+  .hold-cell { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .hold-cell .top { font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hold-cell .bot { font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .holding-name { font-weight: 600; font-size: 14px; }
   .holding-code { font-size: 11px; color: var(--text-faint); font-family: ui-monospace, monospace; }
-  .holding-meta { font-size: 12px; color: var(--text-dim); margin-top: 3px; }
-  .holding-value { text-align: right; }
-  .holding-value .price { font-weight: 700; font-size: 15px; }
-  .holding-value .pl { font-size: 12px; margin-top: 3px; }
 
   /* History table */
   .history-table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -154,6 +165,11 @@
 
   @media (max-width: 640px) {
     .summary-card .value { font-size: 17px; }
+    .cards-grid { grid-template-columns: 1fr; }
+    .hold-hdr { display: none; }
+    .holding-row { grid-template-columns: 1fr 1fr; row-gap: 4px; }
+    .hold-cell .top { font-size: 12px; }
+    .hold-cell .bot { font-size: 10px; }
     .history-table { font-size: 12px; }
     .history-table th, .history-table td { padding: 8px 4px; }
   }
@@ -162,7 +178,12 @@
 <body>
 
 <div class="header">
-  <div class="header-title">📈 국내주식 포트폴리오</div>
+  <div style="flex:1;min-width:0">
+    <div class="header-title">📈 국내주식 포트폴리오</div>
+    <div style="font-size:11px;color:var(--text-faint);margin-top:2px;font-family:ui-monospace,monospace">
+      <span id="verInfo">v —</span> · <span id="priceInfo">시세 —</span>
+    </div>
+  </div>
   <div class="header-actions">
     <span id="conn-status" style="font-size:12px;color:var(--text-dim);margin-right:4px">⚪ 미연결</span>
     <button class="icon-btn primary" id="refresh-btn" onclick="refreshAll()">🔄</button>
@@ -192,6 +213,8 @@ const TX_TAB = '삼성국내';
 const NAMES_TAB = 'kr_names';
 const CONFIG_TAB = 'config_kr';
 const DAILY_TAB = 'daily_value_kr';
+// Build timestamp — bump when shipping a new version
+const BUILD_TIME = '0514-14:33';
 
 // Known KR stock splits — applied automatically via 설정 → "분할 마커 자동 추가"
 // Format: rows with `code === X` AND `date < before` get `split = Y` in column G.
@@ -212,6 +235,7 @@ let state = {
   names: {},
   prices: {},
   codeMarket: {},      // code → '.KS' or '.KQ' (cached after first fetch)
+  lastPriceFetchAt: 0, // epoch ms of last successful price fetch
   selectedCode: null,
   currentTab: 'overview',
 };
@@ -224,6 +248,7 @@ function saveLocal() {
     transactions: state.transactions,
     names: state.names, prices: state.prices,
     codeMarket: state.codeMarket,
+    lastPriceFetchAt: state.lastPriceFetchAt,
   };
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(persist)); } catch (e) {}
 }
@@ -354,6 +379,24 @@ function updateConnStatus(connected) {
   if (connected) { el.textContent = '🟢 연결됨'; el.style.color = 'var(--gain)'; }
   else if (isConfigured()) { el.textContent = '🟡 설정됨'; el.style.color = 'var(--warn)'; }
   else { el.textContent = '⚪ 미연결'; el.style.color = 'var(--text-dim)'; }
+}
+
+function updateHeaderInfo() {
+  const ver = document.getElementById('verInfo');
+  if (ver) ver.textContent = 'v' + BUILD_TIME;
+  const pf = document.getElementById('priceInfo');
+  if (pf) {
+    if (state.lastPriceFetchAt) {
+      const d = new Date(state.lastPriceFetchAt);
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mi = String(d.getMinutes()).padStart(2, '0');
+      pf.textContent = `시세 ${mm}${dd}-${hh}:${mi}`;
+    } else {
+      pf.textContent = '시세 —';
+    }
+  }
 }
 
 // ============ GOOGLE SHEETS API ============
@@ -780,28 +823,37 @@ function renderOverview() {
 
   const holds = computeHoldings(state.transactions);
   const sum = computeSummary(state.transactions, holds, state.prices);
+  const uplPctTotal = sum.costBasis > 0 ? sum.unrealizedPL / sum.costBasis : null;
+  const earnPctTotal = state.initialCash > 0 ? sum.totalGain / state.initialCash : null;
+  const cashPct = sum.totalAsset > 0 ? sum.cash / sum.totalAsset : null;
 
   const cards = `
     <div class="cards-grid">
       <div class="card summary-card">
-        <div class="label">현금</div>
+        <div class="label">📈 평가손익 ${uplPctTotal !== null ? `<span class="${plClass(uplPctTotal)}">(${fmtPct(uplPctTotal)})</span>` : ''}</div>
+        <div class="row2">
+          <div class="value ${plClass(sum.unrealizedPL)}" style="white-space:nowrap">${fmtManSigned(sum.unrealizedPL)}</div>
+          <div class="meta">평가&nbsp;${fmtMan(sum.marketValue)}<br>매수&nbsp;${fmtMan(sum.costBasis)}</div>
+        </div>
+      </div>
+      <div class="card summary-card">
+        <div class="label">💵 현금</div>
         <div class="value">${fmtMan(sum.cash)}</div>
-        <div class="sub">초기자본 ${fmtMan(state.initialCash)}</div>
+        <div class="sub">${cashPct !== null ? `(총자산의 ${(cashPct * 100).toFixed(0)}%)` : ''}</div>
       </div>
       <div class="card summary-card">
-        <div class="label">평가금액 (보유)</div>
-        <div class="value">${fmtMan(sum.marketValue)}</div>
-        <div class="sub ${plClass(sum.unrealizedPL)}">평가손익 ${fmtMan(sum.unrealizedPL)}</div>
+        <div class="label">💰 총수익 ${earnPctTotal !== null ? `<span class="${plClass(earnPctTotal)}">(${fmtPct(earnPctTotal)})</span>` : ''}</div>
+        <div class="row2">
+          <div class="value ${plClass(sum.totalGain)}" style="white-space:nowrap">${fmtManSigned(sum.totalGain)}</div>
+          <div class="meta">자산&nbsp;${fmtMan(sum.totalAsset)}<br>초기&nbsp;${fmtMan(state.initialCash)}</div>
+        </div>
       </div>
       <div class="card summary-card">
-        <div class="label">총수익</div>
-        <div class="value ${plClass(sum.totalGain)}">${fmtMan(sum.totalGain)}</div>
-        <div class="sub">총자산 ${fmtMan(sum.totalAsset)}</div>
-      </div>
-      <div class="card summary-card">
-        <div class="label">실현손익 (누적)</div>
-        <div class="value ${plClass(sum.realizedPL)}">${fmtMan(sum.realizedPL)}</div>
-        <div class="sub ${plClass(sum.realizedPLYTD)}">올해 ${fmtMan(sum.realizedPLYTD)}</div>
+        <div class="label">📊 실현손익</div>
+        <div class="pair">
+          <div class="item"><div class="lbl">YTD</div><div class="v ${plClass(sum.realizedPLYTD)}">${fmtManSigned(sum.realizedPLYTD)}</div></div>
+          <div class="item"><div class="lbl">total</div><div class="v ${plClass(sum.realizedPL)}">${fmtManSigned(sum.realizedPL)}</div></div>
+        </div>
       </div>
     </div>
   `;
@@ -816,7 +868,14 @@ function renderOverview() {
 
   const holdingsHtml = heldCodes.length === 0
     ? `<div class="empty"><div class="emoji">💼</div><div>현재 보유 종목 없음</div></div>`
-    : heldCodes.map(code => {
+    : `<div class="hold-hdr">
+          <div>종목 · 수량</div>
+          <div>평단 / 현재가 (어제/1주)</div>
+          <div>평가손익 / 수익률</div>
+          <div>평가금액 / 매수금액</div>
+          <div>실현 YTD / total</div>
+        </div>` +
+      heldCodes.map(code => {
         const h = holds[code];
         const name = state.names[code] || code;
         const priceObj = state.prices[code];
@@ -827,14 +886,25 @@ function renderOverview() {
         const uplPct = curPrice && h.avgCost > 0 ? (curPrice - h.avgCost) / h.avgCost : null;
         return `
           <div class="holding-row" onclick="selectTicker('${code}')">
-            <div>
-              <div class="holding-name">${escapeHtml(name)}</div>
-              <div class="holding-code">${code}</div>
-              <div class="holding-meta">${h.qty.toString()}주 · 평단 ${fmtMan2(h.avgCost)} · 현재가 ${curPrice ? fmtMan2(curPrice) : '—'}${fmtChangePcts(priceObj)}</div>
+            <div class="hold-cell">
+              <div class="top">${escapeHtml(name)} <span class="text-faint" style="font-size:11px;font-weight:400">${h.qty.toString()}주</span></div>
+              <div class="bot" style="font-family:ui-monospace,monospace">${code}</div>
             </div>
-            <div class="holding-value">
-              <div class="price">${value !== null ? fmtMan(value) : fmtMan(lineCost) + ' (취득가)'}</div>
-              <div class="pl ${plClass(upl)}">${upl !== null ? fmtManSigned(upl) + ' (' + fmtPct(uplPct) + ')' : '—'}</div>
+            <div class="hold-cell">
+              <div class="top">${fmtMan2(h.avgCost)}</div>
+              <div class="bot">${curPrice ? fmtMan2(curPrice) : '—'}${fmtChangePcts(priceObj)}</div>
+            </div>
+            <div class="hold-cell">
+              <div class="top ${plClass(upl)}">${upl !== null ? fmtManSigned(upl) : '—'}</div>
+              <div class="bot ${plClass(uplPct)}">${uplPct !== null ? fmtPct(uplPct) : '—'}</div>
+            </div>
+            <div class="hold-cell">
+              <div class="top">${value !== null ? fmtMan(value) : fmtMan(lineCost)}</div>
+              <div class="bot">${fmtMan(lineCost)}</div>
+            </div>
+            <div class="hold-cell">
+              <div class="top ${plClass(h.realizedPLThisYear)}">${fmtManSigned(h.realizedPLThisYear)}</div>
+              <div class="bot ${plClass(h.realizedPL)}">${fmtManSigned(h.realizedPL)} <span class="text-faint">tot</span></div>
             </div>
           </div>
         `;
@@ -1513,7 +1583,9 @@ async function refreshPrices() {
   toast(`시세 조회 중... (${codes.length}종목)`);
   const { results, failed } = await fetchAllPrices(codes);
   state.prices = { ...state.prices, ...results };
+  if (Object.keys(results).length > 0) state.lastPriceFetchAt = Date.now();
   saveLocal();
+  updateHeaderInfo();
   if (failed.length) toast(`${Object.keys(results).length}종목 완료, ${failed.length}종목 실패`, 'error');
   else toast(`${Object.keys(results).length}종목 시세 갱신`, 'success');
   if (state.currentTab === 'overview') renderOverview();
@@ -1549,6 +1621,7 @@ loadLocal();
 window.addEventListener('load', () => {
   switchTab('overview');
   updateConnStatus(false);
+  updateHeaderInfo();
   // Auto-load on startup if configured
   if (isConfigured() && state.transactions.length > 0) {
     // We have cached data — just refresh prices in background
