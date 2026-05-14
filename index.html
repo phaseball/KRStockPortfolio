@@ -86,6 +86,16 @@
   .summary-card .pair .item .lbl { font-size: 10px; color: var(--text-faint); }
   .summary-card .pair .item .v { font-size: 16px; font-weight: 700; }
 
+  /* Broker switcher (4 sub-tabs in 개요) */
+  .broker-tabs { display: flex; gap: 2px; margin-bottom: 14px; border-bottom: 1px solid var(--border); }
+  .broker-tab {
+    padding: 8px 14px; background: transparent; border: 0; border-bottom: 2px solid transparent;
+    color: var(--text-dim); cursor: pointer; font-size: 13px; font-weight: 500;
+    transition: all 0.15s;
+  }
+  .broker-tab:hover { color: var(--text); }
+  .broker-tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 700; }
+
   /* Holdings header + row: 5 columns × 2 rows */
   .hold-hdr {
     display: grid;
@@ -209,16 +219,29 @@
 <script>
 // ============ CONFIG ============
 const STORAGE_KEY = 'kr_tracker_v1';
-const TX_TAB = '삼성국내';
+const BROKERS = ['삼성국내', '키움국내', '메리츠국내'];
+const TX_TAB = BROKERS[0];   // default/legacy
 const NAMES_TAB = 'kr_names';
 const CONFIG_TAB = 'config_kr';
 const DAILY_TAB = 'daily_value_kr';
 // Build timestamp — bump when shipping a new version
-const BUILD_TIME = '0514-14:33';
+const BUILD_TIME = '0514-15:30';
+
+// KR brokerage fee model (2026, Samsung 증권 default; applied per row in input parser)
+//   매수/매도 브로커리지: 0.0150% of gross
+//   ETF: 브로커리지만 (거래세/농특세 비과세)
+//   주식 매도: + 거래세 0.20% (= 거래세 0.05% 또는 0.18% + 농특세 0.15%, 시점에 따라)
+// Determined empirically from 삼성국내 PDF: 매수=0.0150%, 매도 ETF=0.0150%, 매도 주식=0.2150%.
+const FEE_BROKERAGE = 0.00015;       // 0.0150%
+const FEE_TAX_STOCK_SELL = 0.00200;  // 0.20% (only stocks, only on sells)
+const ETF_PREFIXES = ['KODEX', 'TIGER', 'KBSTAR', 'ACE', 'KOSEF', 'ARIRANG', 'SOL', 'HANARO', 'PLUS', 'RISE', 'TIMEFOLIO', 'WOORI', 'TIMEFOLIO', 'TIME'];
+function isEtfName(name) {
+  if (!name) return false;
+  const s = String(name).toUpperCase().replace(/\s+/g, '');
+  return ETF_PREFIXES.some(p => s.startsWith(p));
+}
 
 // Known KR stock splits — applied automatically via 설정 → "분할 마커 자동 추가"
-// Format: rows with `code === X` AND `date < before` get `split = Y` in column G.
-// Add new entries here when new splits happen.
 const SPLIT_MARKERS = [
   { code: 'A010120', name: 'LS일렉트릭', before: '2026-04-13', split: '1/5' },
 ];
@@ -228,14 +251,15 @@ let state = {
   saKey: null,         // parsed Service Account JSON
   saKeyRaw: '',        // raw JSON string for re-display
   sheetId: '',
-  initialCash: 0,
+  initialCashByBroker: { '삼성국내': 0, '키움국내': 0, '메리츠국내': 0 },
   accessToken: null,
   tokenExpiry: 0,
-  transactions: [],
+  transactions: [],    // ALL brokers combined; each tx has .broker tag
   names: {},
   prices: {},
   codeMarket: {},      // code → '.KS' or '.KQ' (cached after first fetch)
   lastPriceFetchAt: 0, // epoch ms of last successful price fetch
+  activeBroker: '삼성국내',  // 'total' or one of BROKERS
   selectedCode: null,
   currentTab: 'overview',
 };
@@ -244,11 +268,12 @@ function saveLocal() {
   const persist = {
     saKeyRaw: state.saKeyRaw,
     sheetId: state.sheetId,
-    initialCash: state.initialCash,
+    initialCashByBroker: state.initialCashByBroker,
     transactions: state.transactions,
     names: state.names, prices: state.prices,
     codeMarket: state.codeMarket,
     lastPriceFetchAt: state.lastPriceFetchAt,
+    activeBroker: state.activeBroker,
   };
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(persist)); } catch (e) {}
 }
@@ -262,8 +287,28 @@ function loadLocal() {
       if (state.saKeyRaw) {
         try { state.saKey = JSON.parse(state.saKeyRaw); } catch (e) {}
       }
+      // Migrate legacy state.initialCash → state.initialCashByBroker['삼성국내']
+      if (p.initialCash && !p.initialCashByBroker) {
+        state.initialCashByBroker = { '삼성국내': p.initialCash, '키움국내': 0, '메리츠국내': 0 };
+      }
+      // Ensure all broker keys exist
+      for (const b of BROKERS) {
+        if (state.initialCashByBroker[b] == null) state.initialCashByBroker[b] = 0;
+      }
     }
   } catch (e) {}
+}
+
+// Per-broker helpers
+function getTxsForBroker(broker) {
+  if (broker === 'total') return state.transactions;
+  return state.transactions.filter(t => t.broker === broker);
+}
+function getInitialCashForBroker(broker) {
+  if (broker === 'total') {
+    return BROKERS.reduce((s, b) => s + (state.initialCashByBroker[b] || 0), 0);
+  }
+  return state.initialCashByBroker[broker] || 0;
 }
 
 // ============ UTILS ============
@@ -494,39 +539,44 @@ function parseSplitMul(s) {
 
 // ============ DATA LOADING ============
 async function loadTransactions() {
-  const rows = await sheetGet(`${TX_TAB}!A:G`);   // now reads column G (split) too
-  if (rows.length < 2) return [];
   const out = [];
-  for (let i = 1; i < rows.length; i++) {
-    const r = rows[i];
-    if (!r[0]) continue;
-    const origPrice = parseNum(r[2]);
-    const origQty = parseNum(r[3]);
-    const fees = parseNum(r[4]);
-    const settle = parseNum(r[5]);
-    const splitRaw = r[6] ? String(r[6]).trim() : '';
-    const mul = parseSplitMul(splitRaw);
-    out.push({
-      date: parseDate(r[0]),
-      code: String(r[1] || '').trim(),
-      // Split-normalized values (used in all calculations)
-      price: origPrice * mul,
-      qty: origQty / mul,
-      // Originals (kept for reference / display)
-      origPrice, origQty, splitRaw,
-      // Fees and settle don't change with splits (total money flow is fixed)
-      fees,
-      settle,
-      seq: i,
-    });
+  for (const broker of BROKERS) {
+    let rows;
+    try {
+      rows = await sheetGet(`${broker}!A:G`);
+    } catch (e) {
+      // Tab missing or empty — skip
+      continue;
+    }
+    if (!rows || rows.length < 2) continue;
+    for (let i = 1; i < rows.length; i++) {
+      const r = rows[i];
+      if (!r[0]) continue;
+      const origPrice = parseNum(r[2]);
+      const origQty = parseNum(r[3]);
+      const fees = parseNum(r[4]);
+      const settle = parseNum(r[5]);
+      const splitRaw = r[6] ? String(r[6]).trim() : '';
+      const mul = parseSplitMul(splitRaw);
+      out.push({
+        date: parseDate(r[0]),
+        code: String(r[1] || '').trim(),
+        price: origPrice * mul,
+        qty: origQty / mul,
+        origPrice, origQty, splitRaw,
+        fees, settle,
+        seq: i,
+        broker,
+      });
+    }
   }
-  // Sort: date asc, then BUYS BEFORE SELLS on the same day (handles intraday
-  // day-trades where PDF order isn't strictly chronological), then sheet row order.
+  // Sort: date asc, BUYS BEFORE SELLS on same day, then broker name, then sheet row order
   out.sort((a, b) => {
     if (a.date !== b.date) return a.date < b.date ? -1 : 1;
     const aIsBuy = a.qty > 0 ? 0 : 1;
     const bIsBuy = b.qty > 0 ? 0 : 1;
     if (aIsBuy !== bIsBuy) return aIsBuy - bIsBuy;
+    if (a.broker !== b.broker) return a.broker < b.broker ? -1 : 1;
     return a.seq - b.seq;
   });
   return out;
@@ -765,7 +815,7 @@ function computeHoldings(txs) {
   return holds;
 }
 
-function computeSummary(txs, holds, prices) {
+function computeSummary(txs, holds, prices, initialCash) {
   // Cash: tracks actual cash flow including fees (settle column = gross ± fees)
   let buyTotal = 0, sellTotal = 0, feesTotal = 0;
   for (const tx of txs) {
@@ -773,7 +823,7 @@ function computeSummary(txs, holds, prices) {
     if (tx.qty > 0) buyTotal += tx.settle;      // settle for buy = price*qty + fees
     else sellTotal += tx.settle;                 // settle for sell = price*qty - fees
   }
-  const cash = state.initialCash - buyTotal + sellTotal;
+  const cash = initialCash - buyTotal + sellTotal;
 
   // Holdings sums
   let marketValue = 0, unrealizedPL = 0, costBasis = 0, realizedPL = 0, realizedPLYTD = 0;
@@ -795,8 +845,8 @@ function computeSummary(txs, holds, prices) {
     }
   }
   const totalAsset = cash + marketValue;
-  const totalGain = totalAsset - state.initialCash;
-  return { cash, marketValue, unrealizedPL, costBasis, realizedPL, realizedPLYTD, totalAsset, totalGain, buyTotal, sellTotal, feesTotal };
+  const totalGain = totalAsset - initialCash;
+  return { cash, marketValue, unrealizedPL, costBasis, realizedPL, realizedPLYTD, totalAsset, totalGain, buyTotal, sellTotal, feesTotal, initialCash };
 }
 
 // ============ RENDERING ============
@@ -811,6 +861,12 @@ function switchTab(name) {
   else if (name === 'settings') renderSettings();
 }
 
+function setActiveBroker(broker) {
+  state.activeBroker = broker;
+  saveLocal();
+  renderOverview();
+}
+
 function renderOverview() {
   const root = document.getElementById('tab-overview');
   if (state.selectedCode) { renderTickerDetail(state.selectedCode); return; }
@@ -821,10 +877,23 @@ function renderOverview() {
     return;
   }
 
-  const holds = computeHoldings(state.transactions);
-  const sum = computeSummary(state.transactions, holds, state.prices);
+  // Broker switcher: 삼성국내 / 키움국내 / 메리츠국내 / 전체
+  const brokerTabs = `
+    <div class="broker-tabs">
+      ${BROKERS.map(b => {
+        const c = state.transactions.filter(t => t.broker === b).length;
+        return `<button class="broker-tab ${state.activeBroker === b ? 'active' : ''}" onclick="setActiveBroker('${b}')">${b.replace('국내', '')} <span class="text-faint" style="font-weight:400;font-size:10px">${c}</span></button>`;
+      }).join('')}
+      <button class="broker-tab ${state.activeBroker === 'total' ? 'active' : ''}" onclick="setActiveBroker('total')">전체 <span class="text-faint" style="font-weight:400;font-size:10px">${state.transactions.length}</span></button>
+    </div>
+  `;
+
+  const txs = getTxsForBroker(state.activeBroker);
+  const initialCash = getInitialCashForBroker(state.activeBroker);
+  const holds = computeHoldings(txs);
+  const sum = computeSummary(txs, holds, state.prices, initialCash);
   const uplPctTotal = sum.costBasis > 0 ? sum.unrealizedPL / sum.costBasis : null;
-  const earnPctTotal = state.initialCash > 0 ? sum.totalGain / state.initialCash : null;
+  const earnPctTotal = initialCash > 0 ? sum.totalGain / initialCash : null;
   const cashPct = sum.totalAsset > 0 ? sum.cash / sum.totalAsset : null;
 
   const cards = `
@@ -845,7 +914,7 @@ function renderOverview() {
         <div class="label">💰 총수익 ${earnPctTotal !== null ? `<span class="${plClass(earnPctTotal)}">(${fmtPct(earnPctTotal)})</span>` : ''}</div>
         <div class="row2">
           <div class="value ${plClass(sum.totalGain)}" style="white-space:nowrap">${fmtManSigned(sum.totalGain)}</div>
-          <div class="meta">자산&nbsp;${fmtMan(sum.totalAsset)}<br>초기&nbsp;${fmtMan(state.initialCash)}</div>
+          <div class="meta">자산&nbsp;${fmtMan(sum.totalAsset)}<br>초기&nbsp;${fmtMan(sum.initialCash)}</div>
         </div>
       </div>
       <div class="card summary-card">
@@ -918,7 +987,7 @@ function renderOverview() {
     ${holdingsHtml}
   </div>`;
 
-  root.innerHTML = cards + holdingsCard;
+  root.innerHTML = brokerTabs + cards + holdingsCard;
 }
 
 function pricesAsOfStr() {
@@ -1147,16 +1216,26 @@ function parseInputRows(text) {
       return;
     }
 
-    // Estimate fees (broker ~0.014%, KR trading tax 0.18% on sells)
+    // ETF detection by Korean name prefix
+    const isEtf = isEtfName(name);
     const price = Math.round(priceMan * 10000);
     const isBuy = qty > 0;
     const gross = price * Math.abs(qty);
-    const brokerage = Math.round(gross * 0.00014);
-    const tradingTax = isBuy ? 0 : Math.round(gross * 0.0018);
-    const fees = brokerage + tradingTax;
+    // Brokerage applies to all (0.0150%)
+    const brokerage = Math.round(gross * FEE_BROKERAGE);
+    // Tax: only stock sells (KOSPI/KOSDAQ) — ETF sells are tax-exempt
+    const tax = (!isBuy && !isEtf) ? Math.round(gross * FEE_TAX_STOCK_SELL) : 0;
+    const fees = brokerage + tax;
     const settle = isBuy ? gross + fees : gross - fees;
 
-    rows.push([currentDate, code, price, qty, fees, settle, '']);
+    // Validate broker name (currentAccount from #header)
+    const broker = BROKERS.includes(currentAccount) ? currentAccount : null;
+    if (!broker) {
+      errors.push(`${lineNum}행: 알 수 없는 계정 "${currentAccount}" (지원: ${BROKERS.join(', ')})`);
+      return;
+    }
+
+    rows.push([broker, currentDate, code, price, qty, fees, settle, '']);
   });
 
   // Warn if no rows parsed at all
@@ -1175,16 +1254,16 @@ function renderInput() {
   const previewHtml = parsed.rows.length === 0
     ? `<div class="empty" style="padding:18px"><div style="font-size:12px;color:var(--text-faint)">위 textarea에 데이터를 붙여넣고 "미리보기"를 누르세요</div></div>`
     : `<div style="overflow-x:auto"><table>
-        <thead><tr><th>매매일</th><th>종목코드</th><th>종목명</th><th>단가</th><th>수량</th><th>수수료</th><th>정산금액</th><th>split</th></tr></thead>
+        <thead><tr><th>계정</th><th>매매일</th><th>종목코드</th><th>종목명</th><th>단가</th><th>수량</th><th>수수료</th><th>정산금액</th></tr></thead>
         <tbody>${parsed.rows.map(r => `<tr>
-          <td>${r[0]}</td>
+          <td><span style="font-size:11px;color:var(--accent)">${escapeHtml(r[0].replace('국내', ''))}</span></td>
           <td>${r[1]}</td>
-          <td><span class="text-faint">${escapeHtml(state.names[r[1]] || '—')}</span></td>
-          <td>${fmtMan2(r[2])}</td>
-          <td class="${r[3] > 0 ? 'gain' : 'loss'}">${signed(r[3])}</td>
-          <td>${fmtMan3(r[4])}</td>
-          <td>${fmtMan2(r[5])}</td>
-          <td>${escapeHtml(r[6] || '')}</td>
+          <td>${r[2]}</td>
+          <td><span class="text-faint">${escapeHtml(state.names[r[2]] || '—')}</span></td>
+          <td>${fmtMan2(r[3])}</td>
+          <td class="${r[4] > 0 ? 'gain' : 'loss'}">${signed(r[4])}</td>
+          <td>${fmtMan3(r[5])}</td>
+          <td>${fmtMan2(r[6])}</td>
         </tr>`).join('')}</tbody></table></div>`;
 
   const errorsHtml = parsed.errors.length === 0 ? '' :
@@ -1258,10 +1337,22 @@ function clearInputForm() {
 async function commitInput() {
   if (!isConfigured()) { toast('연결 설정 먼저', 'error'); return; }
   if (!lastParsedInput.rows.length) { toast('미리보기 먼저 실행', 'error'); return; }
-  if (!confirm(`${lastParsedInput.rows.length}건을 ${TX_TAB} 시트에 추가합니다. 계속?`)) return;
+
+  // Group by broker (row[0]); values to write are columns A..G (date..split)
+  const byBroker = {};
+  for (const r of lastParsedInput.rows) {
+    const broker = r[0];
+    if (!byBroker[broker]) byBroker[broker] = [];
+    byBroker[broker].push(r.slice(1));   // [date, code, price, qty, fees, settle, split]
+  }
+  const summary = Object.entries(byBroker).map(([b, rs]) => `${b}: ${rs.length}건`).join(', ');
+  if (!confirm(`${lastParsedInput.rows.length}건을 시트에 추가:\n${summary}\n\n계속?`)) return;
+
   try {
     toast('Sheet에 추가 중...');
-    await sheetAppend(`${TX_TAB}!A:G`, lastParsedInput.rows);
+    for (const [broker, rs] of Object.entries(byBroker)) {
+      await sheetAppend(`${broker}!A:G`, rs);
+    }
     toast(`✓ ${lastParsedInput.rows.length}건 추가 완료. 거래내역 다시 로드 중...`, 'success');
     lastParsedInput = { rows: [], errors: [] };
     clearInputForm();
@@ -1288,8 +1379,15 @@ function renderSettings() {
         <input type="text" id="set-sheet-id" value="${escapeAttr(state.sheetId)}" placeholder="구글시트 URL의 /d/와 /edit 사이 문자열">
       </div>
       <div class="field">
-        <label>초기 자본 (KRW)</label>
-        <input type="number" id="set-initial-cash" value="${state.initialCash || ''}" placeholder="예: 10000000">
+        <label>초기 자본 (KRW, 브로커별)</label>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+          ${BROKERS.map(b => `
+            <div>
+              <div style="font-size:11px;color:var(--text-dim);margin-bottom:4px">${b}</div>
+              <input type="number" id="set-init-${b}" value="${state.initialCashByBroker[b] || ''}" placeholder="0" style="width:100%">
+            </div>
+          `).join('')}
+        </div>
       </div>
       <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
         <button class="icon-btn primary" onclick="saveSettings()">저장</button>
@@ -1298,7 +1396,7 @@ function renderSettings() {
       </div>
       <div style="margin-top:14px;padding:10px;background:var(--bg);border-radius:6px;font-size:12px;color:var(--text-dim);line-height:1.7">
         <div><b>📋 시트 탭 구성</b></div>
-        <div>• <b>${TX_TAB}</b>: 매매일 · 종목코드 · 체결단가 · 체결수량 · 수수료 · 정산금액 · <b style="color:var(--accent)">split</b></div>
+        <div>• <b>${BROKERS.join('</b>, <b>')}</b>: 매매일 · 종목코드 · 체결단가 · 체결수량 · 수수료 · 정산금액 · <b style="color:var(--accent)">split</b></div>
         <div style="padding-left:14px;font-size:11px">└ <b>split</b> (G열): 액면분할 마커. 분할 이전 행에만 입력.</div>
         <div style="padding-left:14px;font-size:11px">&nbsp;&nbsp;예) 1/5 분할 (가격 1/5, 수량 5배): <code>1/5</code> 입력 → 가격×0.2, 수량÷0.2</div>
         <div style="padding-left:14px;font-size:11px">&nbsp;&nbsp;예) 5:1 병합 (가격 5배, 수량 1/5): <code>5</code> 입력 → 가격×5, 수량÷5</div>
@@ -1376,11 +1474,30 @@ function saveSettings() {
     }
   }
   state.sheetId = document.getElementById('set-sheet-id').value.trim();
-  state.initialCash = Number(document.getElementById('set-initial-cash').value) || 0;
+  for (const b of BROKERS) {
+    const el = document.getElementById('set-init-' + b);
+    state.initialCashByBroker[b] = Number(el?.value) || 0;
+  }
   // Reset cached token since key may have changed
   state.accessToken = null; state.tokenExpiry = 0;
   saveLocal();
   updateConnStatus(false);
+  // Write per-broker initial_cash to config_kr (best-effort; ignore failures)
+  if (state.sheetId && state.saKey) {
+    (async () => {
+      try {
+        const rows = BROKERS.map(b => [`initial_cash_${b}`, state.initialCashByBroker[b] || 0]);
+        // Clear existing initial_cash_* rows by overwriting A:B from row 1
+        // Simpler: just write rows; existing extra rows may remain but won't conflict
+        const token = await getAccessToken();
+        await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${state.sheetId}/values/${encodeURIComponent(CONFIG_TAB)}!A1?valueInputOption=USER_ENTERED`, {
+          method: 'PUT',
+          headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ values: rows }),
+        }).catch(() => {});
+      } catch (e) {}
+    })();
+  }
   toast('저장됨. 연결 테스트를 눌러보세요.', 'success');
   renderSettings();
 }
@@ -1411,12 +1528,15 @@ async function testConnection() {
 async function ensureTabs() {
   if (!isConfigured()) { toast('먼저 JSON과 Sheet ID를 저장하세요', 'error'); return; }
   try {
-    for (const tab of [TX_TAB, NAMES_TAB, CONFIG_TAB, DAILY_TAB]) {
+    const allTabs = [...BROKERS, NAMES_TAB, CONFIG_TAB, DAILY_TAB];
+    for (const tab of allTabs) {
       try { await sheetCreate(tab); } catch (e) {}
     }
-    try { await sheetAppend(`${TX_TAB}!A1`, [['매매일', '종목코드', '체결단가', '체결수량', '수수료', '정산금액', 'split']]); } catch (e) {}
+    for (const broker of BROKERS) {
+      try { await sheetAppend(`${broker}!A1`, [['매매일', '종목코드', '체결단가', '체결수량', '수수료', '정산금액', 'split']]); } catch (e) {}
+    }
     try { await sheetAppend(`${NAMES_TAB}!A1`, [['종목코드', '종목명']]); } catch (e) {}
-    toast('탭 확인/생성 완료', 'success');
+    toast('모든 탭 확인/생성 완료', 'success');
   } catch (e) {
     toast('실패: ' + e.message, 'error');
   }
@@ -1478,7 +1598,7 @@ async function recalcDailyValues() {
     // Walk through dates, build snapshots
     toast(`스냅샷 계산 중 (${sortedDates.length}일)...`);
     const out = [['date', 'totalValue', 'cash', 'holdings', 'prices']];
-    let cash = state.initialCash;
+    let cash = getInitialCashForBroker('total');
     const positions = {};
     const lastKnown = {};  // forward-fill last observed price per code
     let txIdx = 0;
@@ -1557,24 +1677,26 @@ async function applySplitMarkers() {
   if (!confirm(`다음 분할 마커를 ${TX_TAB} 시트 G열에 추가합니다:\n\n${desc}\n\n기존 G열 값이 있는 행은 건너뜁니다.\n계속하시겠습니까?`)) return;
   try {
     toast('시트 읽는 중...');
-    const rows = await sheetGet(`${TX_TAB}!A:G`);
-    if (rows.length < 2) { toast('데이터 없음', 'error'); return; }
-
     const updates = [];
     let added = 0, skipped = 0;
-    for (let i = 1; i < rows.length; i++) {
-      const r = rows[i];
-      if (!r[0]) continue;
-      const rowDate = parseDate(r[0]);
-      const rowCode = String(r[1] || '').trim();
-      const existing = r[6] !== undefined && r[6] !== null && String(r[6]).trim() !== '';
-      for (const rule of SPLIT_MARKERS) {
-        if (rowCode === rule.code && rowDate < rule.before) {
-          if (existing) { skipped++; }
-          else {
-            // Sheet row number = array index i (since rows[0] is header at row 1)
-            updates.push({ range: `${TX_TAB}!G${i + 1}`, values: [[rule.split]] });
-            added++;
+    for (const broker of BROKERS) {
+      let rows;
+      try { rows = await sheetGet(`${broker}!A:G`); }
+      catch (e) { continue; }
+      if (!rows || rows.length < 2) continue;
+      for (let i = 1; i < rows.length; i++) {
+        const r = rows[i];
+        if (!r[0]) continue;
+        const rowDate = parseDate(r[0]);
+        const rowCode = String(r[1] || '').trim();
+        const existing = r[6] !== undefined && r[6] !== null && String(r[6]).trim() !== '';
+        for (const rule of SPLIT_MARKERS) {
+          if (rowCode === rule.code && rowDate < rule.before) {
+            if (existing) { skipped++; }
+            else {
+              updates.push({ range: `${broker}!G${i + 1}`, values: [[rule.split]] });
+              added++;
+            }
           }
         }
       }
@@ -1612,7 +1734,16 @@ async function refreshTransactions() {
     state.transactions = await loadTransactions();
     state.names = await loadNames();
     const cfg = await loadConfig();
-    if (cfg.initial_cash) state.initialCash = Number(cfg.initial_cash) || state.initialCash;
+    // Per-broker initial cash from config_kr (with legacy fallback to flat initial_cash)
+    for (const b of BROKERS) {
+      const v = cfg['initial_cash_' + b];
+      if (v !== undefined && v !== null && v !== '') {
+        state.initialCashByBroker[b] = Number(v) || 0;
+      }
+    }
+    if (cfg.initial_cash && !state.initialCashByBroker['삼성국내']) {
+      state.initialCashByBroker['삼성국내'] = Number(cfg.initial_cash) || 0;
+    }
     saveLocal();
     toast(`${state.transactions.length}건 로드됨`, 'success');
     if (state.currentTab === 'overview') renderOverview();
@@ -1651,7 +1782,8 @@ function clearCache() {
   localStorage.removeItem(STORAGE_KEY);
   state.transactions = []; state.prices = {}; state.names = {}; state.codeMarket = {};
   state.accessToken = null; state.tokenExpiry = 0;
-  state.saKey = null; state.saKeyRaw = ''; state.sheetId = ''; state.initialCash = 0;
+  state.saKey = null; state.saKeyRaw = ''; state.sheetId = '';
+  state.initialCashByBroker = { '삼성국내': 0, '키움국내': 0, '메리츠국내': 0 };
   updateConnStatus(false);
   toast('캐시 삭제됨', 'success');
   switchTab('settings');
