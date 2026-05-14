@@ -1126,9 +1126,10 @@ function toggleBench(code, on) { state.chartBenches[code] = on; saveLocal(); dra
 function renderChartControls() {
   const el = document.getElementById('chart-controls-host');
   if (!el) return;
+  const periods = ['total', '1y', '6m', '3m', '2026', '2025'];
   el.innerHTML = `
     <div><span class="lbl">기간</span>
-      ${['total','1y','6m','3m'].map(p => `<button class="cbtn ${state.chartPeriod===p?'on':''}" onclick="setChartPeriod('${p}')">${p.toUpperCase()}</button>`).join('')}
+      ${periods.map(p => `<button class="cbtn ${state.chartPeriod===p?'on':''}" onclick="setChartPeriod('${p}')">${p === 'total' ? 'TOTAL' : p.toUpperCase()}</button>`).join('')}
     </div>
     <div><span class="lbl">스케일</span>
       ${['log','linear'].map(s => `<button class="cbtn ${state.chartScale===s?'on':''}" onclick="setChartScale('${s}')">${s}</button>`).join('')}
@@ -1148,7 +1149,8 @@ async function renderTotalChart() {
     <div class="chart-canvas-wrap">
       <canvas id="chartCanvas" style="width:100%;height:420px"></canvas>
     </div>
-    <div id="chartStatus" style="font-size:11px;color:var(--text-faint);text-align:center;padding:10px"></div>
+    <div id="chartStatus" style="font-size:11px;color:var(--text-faint);text-align:center;padding:6px"></div>
+    <div id="chartSummary" style="margin-top:12px"></div>
   `;
   renderChartControls();
   await drawTotalChart();
@@ -1203,17 +1205,20 @@ async function fetchYahooHist(symbol, range = '5y') {
   return {};
 }
 
-function periodCutoffDate(period) {
-  if (period === 'total') return '0000-00-00';
+function filterByPeriod(daily, period) {
+  if (period === 'total') return daily.slice();
+  if (period === '2025') return daily.filter(d => d.date >= '2025-01-01' && d.date <= '2025-12-31');
+  if (period === '2026') return daily.filter(d => d.date >= '2026-01-01' && d.date <= '2026-12-31');
   const now = new Date();
-  let d;
-  if (period === '1y') d = new Date(now.getFullYear()-1, now.getMonth(), now.getDate());
-  else if (period === '6m') d = new Date(now.getFullYear(), now.getMonth()-6, now.getDate());
-  else if (period === '3m') d = new Date(now.getFullYear(), now.getMonth()-3, now.getDate());
-  else return '0000-00-00';
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  return `${d.getFullYear()}-${mm}-${dd}`;
+  let cutD;
+  if (period === '1y') cutD = new Date(now.getFullYear()-1, now.getMonth(), now.getDate());
+  else if (period === '6m') cutD = new Date(now.getFullYear(), now.getMonth()-6, now.getDate());
+  else if (period === '3m') cutD = new Date(now.getFullYear(), now.getMonth()-3, now.getDate());
+  else return daily.slice();
+  const mm = String(cutD.getMonth() + 1).padStart(2, '0');
+  const dd = String(cutD.getDate()).padStart(2, '0');
+  const cutoff = `${cutD.getFullYear()}-${mm}-${dd}`;
+  return daily.filter(d => d.date >= cutoff);
 }
 
 async function drawTotalChart() {
@@ -1226,7 +1231,7 @@ async function drawTotalChart() {
     _cachedDaily = await loadDailyValues();
   }
   if (!_cachedDaily.length) {
-    status.textContent = '⚠ daily_value_kr 데이터 없음. 설정 → "일별 가치 재계산" 먼저 실행하세요.';
+    status.textContent = '⚠ daily_value_kr 데이터 없음. 설정 → "daily_value 재계산" 먼저 실행하세요.';
     return;
   }
 
@@ -1238,11 +1243,11 @@ async function drawTotalChart() {
     _cachedBench[b.code] = await fetchYahooHist(b.code, '5y');
   }
 
-  // Filter by period
-  const cutoff = periodCutoffDate(state.chartPeriod);
-  const series = _cachedDaily.filter(d => d.date >= cutoff);
+  // Filter by selected period
+  const series = filterByPeriod(_cachedDaily, state.chartPeriod);
   if (!series.length) {
     status.textContent = '선택한 기간에 데이터 없음.';
+    document.getElementById('chartSummary').innerHTML = '';
     return;
   }
 
@@ -1255,11 +1260,9 @@ async function drawTotalChart() {
   for (const b of enabledBenches) {
     const hist = _cachedBench[b.code] || {};
     const startDate = series[0].date;
-    // Find base price = first hist entry on or after startDate
     const histDates = Object.keys(hist).filter(d => d >= startDate).sort();
     if (!histDates.length) continue;
     const benchBase = hist[histDates[0]];
-    // Forward-fill missing dates from previous available close
     let lastVal = null;
     const data = series.map(d => {
       if (hist[d.date] != null) lastVal = hist[d.date];
@@ -1288,8 +1291,8 @@ async function drawTotalChart() {
         {
           label: '내 포트폴리오',
           data: portfolioData,
-          borderColor: '#ef4444',
-          backgroundColor: '#ef4444',
+          borderColor: '#22d3ee',           // cyan (v4 style)
+          backgroundColor: '#22d3ee',
           borderWidth: 2.5,
           tension: 0,
           pointRadius: 0,
@@ -1319,9 +1322,16 @@ async function drawTotalChart() {
         tooltip: {
           mode: 'index', intersect: false,
           callbacks: {
-            label: ctx => {
-              const v = ctx.parsed.y;
-              return `${ctx.dataset.label}: ${v != null ? v.toFixed(1) : '—'} (base=100)`;
+            label: (tctx) => {
+              const v = tctx.parsed.y;
+              if (v == null) return '';
+              const idx = tctx.dataIndex;
+              // Portfolio gets both normalized + raw KRW value (₩ symbol)
+              if (tctx.dataset.label === '내 포트폴리오' && series[idx]) {
+                const real = series[idx].totalValue;
+                return `${tctx.dataset.label}: ${v.toFixed(1)} (₩${fmtMan(real)})`;
+              }
+              return `${tctx.dataset.label}: ${v.toFixed(1)}`;
             },
           },
         },
@@ -1332,7 +1342,42 @@ async function drawTotalChart() {
   const startD = series[0].date;
   const endD = series[series.length-1].date;
   const portfolioEnd = portfolioData[portfolioData.length-1];
-  status.textContent = `${series.length}일 · ${startD} → ${endD} · 포트폴리오 ${(portfolioEnd-100).toFixed(1)}% (base=100, ${state.chartScale} scale)`;
+  status.textContent = `${series.length}일 · ${startD} → ${endD} · ${(portfolioEnd-100).toFixed(1)}% (base=100, ${state.chartScale} scale)`;
+
+  // Summary table: chosen period + each year (2025, 2026)
+  renderChartSummary(series);
+}
+
+function renderChartSummary(periodSeries) {
+  const el = document.getElementById('chartSummary');
+  if (!el) return;
+  const buildRow = (label, daily) => {
+    if (!daily || !daily.length) return `<tr><td>${label}</td><td colspan="3" class="text-faint">데이터 없음</td></tr>`;
+    const start = daily[0].totalValue;
+    const end = daily[daily.length-1].totalValue;
+    const diff = end - start;
+    const pct = start > 0 ? (end - start) / start : null;
+    const cls = plClass(diff);
+    return `<tr>
+      <td><b>${label}</b> <span class="text-faint" style="font-size:10px">${daily[0].date}→${daily[daily.length-1].date}</span></td>
+      <td>₩${fmtMan(start)}</td>
+      <td>₩${fmtMan(end)}</td>
+      <td class="${cls}">${fmtManSigned(diff)} ${pct !== null ? `<span style="font-size:11px">(${fmtPct(pct)})</span>` : ''}</td>
+    </tr>`;
+  };
+  const yearSeries = (y) => _cachedDaily.filter(d => d.date >= `${y}-01-01` && d.date <= `${y}-12-31`);
+  el.innerHTML = `
+    <div class="card" style="padding:0;margin-top:8px">
+      <table class="history-table" style="margin:0">
+        <thead><tr><th>구간</th><th>시작</th><th>끝</th><th>변동</th></tr></thead>
+        <tbody>
+          ${buildRow(`선택 (${state.chartPeriod.toUpperCase()})`, periodSeries)}
+          ${buildRow('2026', yearSeries('2026'))}
+          ${buildRow('2025', yearSeries('2025'))}
+        </tbody>
+      </table>
+    </div>
+  `;
 }
 
 function renderTickerDetail(code) {
@@ -1987,7 +2032,25 @@ async function recalcDailyValues() {
     // Walk through dates, build snapshots
     toast(`스냅샷 계산 중 (${sortedDates.length}일)...`);
     const out = [['date', 'totalValue', 'cash', 'holdings', 'prices']];
-    let cash = getInitialCashForBroker('total');
+
+    // Determine effective initial cash: max(user setting, minimum required for trades).
+    // The "minimum required" = -min(cumulative_cash_flow) so cash never dips below 0.
+    // This corrects the case where the user hasn't set initial_cash, which would
+    // produce negative totalValues during peak-buying periods.
+    const userInitial = getInitialCashForBroker('total');
+    let cumCashFlow = 0;
+    let minCum = 0;
+    for (const tx of sorted) {
+      if (tx.qty > 0) cumCashFlow -= tx.settle;
+      else cumCashFlow += tx.settle;
+      if (cumCashFlow < minCum) minCum = cumCashFlow;
+    }
+    const minRequired = Math.max(0, -minCum);
+    let cash = Math.max(userInitial, minRequired);
+    if (cash > userInitial) {
+      console.log(`[daily_value] Auto-bumped initial cash from ${userInitial} to ${cash} (min required to keep cash≥0)`);
+      toast(`⚠ 초기자본이 부족해 자동으로 ${fmtMan(cash)}로 보정 (설정에서 수정 권장)`, 'success');
+    }
     const positions = {};
     const lastKnown = {};  // forward-fill last observed price per code
     let txIdx = 0;
