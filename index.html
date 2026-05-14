@@ -191,6 +191,13 @@ const NAMES_TAB = 'kr_names';
 const CONFIG_TAB = 'config_kr';
 const DAILY_TAB = 'daily_value_kr';
 
+// Known KR stock splits — applied automatically via 설정 → "분할 마커 자동 추가"
+// Format: rows with `code === X` AND `date < before` get `split = Y` in column G.
+// Add new entries here when new splits happen.
+const SPLIT_MARKERS = [
+  { code: 'A010120', name: 'LS일렉트릭', before: '2026-04-13', split: '1/5' },
+];
+
 // ============ STATE ============
 let state = {
   saKey: null,         // parsed Service Account JSON
@@ -884,6 +891,17 @@ function renderSettings() {
     </div>
 
     <div class="card" style="margin-top:12px">
+      <h2>액면분할 마커</h2>
+      <div style="font-size:12px;color:var(--text-dim);line-height:1.7;margin-bottom:8px">
+        시트 G열(<code>split</code>)에 자동으로 분할 마커를 추가합니다. 기존 값이 있는 행은 건너뜁니다.
+      </div>
+      <div style="background:var(--bg);padding:10px;border-radius:6px;font-size:12px;color:var(--text-dim);font-family:ui-monospace,monospace;line-height:1.7;margin-bottom:10px">
+        ${SPLIT_MARKERS.map(r => `<div>• ${r.code} (${r.name || '—'}) — ${r.before} 이전 행 → split=<b style="color:var(--accent)">${r.split}</b></div>`).join('')}
+      </div>
+      <button class="icon-btn primary" onclick="applySplitMarkers()">🔧 분할 마커 자동 추가</button>
+    </div>
+
+    <div class="card" style="margin-top:12px">
       <h2>도움말</h2>
       <div style="font-size:13px;color:var(--text-dim);line-height:1.8">
         <div>• 인증: Service Account (JWT 자동 갱신)</div>
@@ -958,6 +976,61 @@ async function ensureTabs() {
     try { await sheetAppend(`${TX_TAB}!A1`, [['매매일', '종목코드', '체결단가', '체결수량', '수수료', '정산금액', 'split']]); } catch (e) {}
     try { await sheetAppend(`${NAMES_TAB}!A1`, [['종목코드', '종목명']]); } catch (e) {}
     toast('탭 확인/생성 완료', 'success');
+  } catch (e) {
+    toast('실패: ' + e.message, 'error');
+  }
+}
+
+// Write split marks to column G in the Sheet. Skips rows that already have a value.
+async function applySplitMarkers() {
+  if (!isConfigured()) { toast('먼저 JSON과 Sheet ID를 저장하세요', 'error'); return; }
+  const desc = SPLIT_MARKERS.map(r => `• ${r.code} (${r.name || ''}): ${r.before} 이전 → ${r.split}`).join('\n');
+  if (!confirm(`다음 분할 마커를 ${TX_TAB} 시트 G열에 추가합니다:\n\n${desc}\n\n기존 G열 값이 있는 행은 건너뜁니다.\n계속하시겠습니까?`)) return;
+  try {
+    toast('시트 읽는 중...');
+    const rows = await sheetGet(`${TX_TAB}!A:G`);
+    if (rows.length < 2) { toast('데이터 없음', 'error'); return; }
+
+    const updates = [];
+    let added = 0, skipped = 0;
+    for (let i = 1; i < rows.length; i++) {
+      const r = rows[i];
+      if (!r[0]) continue;
+      const rowDate = parseDate(r[0]);
+      const rowCode = String(r[1] || '').trim();
+      const existing = r[6] !== undefined && r[6] !== null && String(r[6]).trim() !== '';
+      for (const rule of SPLIT_MARKERS) {
+        if (rowCode === rule.code && rowDate < rule.before) {
+          if (existing) { skipped++; }
+          else {
+            // Sheet row number = array index i (since rows[0] is header at row 1)
+            updates.push({ range: `${TX_TAB}!G${i + 1}`, values: [[rule.split]] });
+            added++;
+          }
+        }
+      }
+    }
+
+    if (!added) {
+      toast(`추가할 행 없음 (기존 유지: ${skipped}건)`, skipped > 0 ? 'success' : 'error');
+      return;
+    }
+
+    toast(`${added}개 행에 마커 쓰는 중...`);
+    const token = await getAccessToken();
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${state.sheetId}/values:batchUpdate`;
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: updates }),
+    });
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => '');
+      throw new Error(`BatchUpdate ${resp.status}: ${errText.slice(0, 200)}`);
+    }
+
+    toast(`✓ ${added}개 마커 추가 완료 (기존 유지: ${skipped}). 거래내역 다시 로드 중...`, 'success');
+    await refreshTransactions();
   } catch (e) {
     toast('실패: ' + e.message, 'error');
   }
