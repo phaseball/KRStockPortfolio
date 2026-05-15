@@ -358,6 +358,17 @@ function getInitialCashForBroker(broker) {
 }
 
 // ============ UTILS ============
+// Korean timezone (UTC+9) date helpers
+function getKoreanDate(date = new Date()) {
+  // Convert to Korean timezone (UTC+9)
+  const utc = date.getTime() + date.getTimezoneOffset() * 60000;
+  const kst = new Date(utc + 9 * 3600000);
+  return kst.toISOString().slice(0, 10);
+}
+function getKoreanToday() {
+  return getKoreanDate();
+}
+
 // All numeric output: 만(萬, 10,000) unit, NO thousand-separator commas.
 // 1 decimal everywhere unless value < 1만 (then 2 decimals for precision).
 // Pass suffix='' to omit '만' (used in ticker cards/rows).
@@ -754,9 +765,9 @@ async function fetchYahooPrice(code) {
   valid.sort((a, b) => b.snap.marketTime - a.snap.marketTime);
   const winner = valid[0];
 
-  // Compute yesterday/1w from the series (today's bar excluded)
-  const todayISO = new Date().toISOString().slice(0, 10);
-  const past = winner.snap.series.filter(s => new Date(s.ts * 1000).toISOString().slice(0, 10) < todayISO);
+  // Compute yesterday/1w from the series (today's bar excluded, use Korean date)
+  const todayISO = getKoreanToday();
+  const past = winner.snap.series.filter(s => getKoreanDate(new Date(s.ts * 1000)) < todayISO);
   const yesterdayClose = past.length > 0 ? past[past.length - 1].close : null;
   const week1Close = past.length >= 5 ? past[past.length - 5].close : null;
   const price = winner.snap.price;
@@ -771,7 +782,7 @@ async function fetchYahooPrice(code) {
     price,
     changeRate,
     week1Rate,
-    asOf: new Date().toISOString().slice(0, 10),
+    asOf: getKoreanToday(),
     market: winner.sfx,
     exchangeName: winner.snap.exchangeName,
   };
@@ -1016,20 +1027,23 @@ function renderOverview() {
   const earnPctTotal = initialCash > 0 ? sum.totalGain / initialCash : null;
   const cashPct = sum.totalAsset > 0 ? sum.cash / sum.totalAsset : null;
 
-  // Get yesterday's values for % change calculation
+  // Get yesterday's values for % change calculation (use Korean timezone)
+  const todayKST = getKoreanToday();
+  const yesterdayKST = (() => {
+    const d = parseDate(todayKST);
+    d.setDate(d.getDate() - 1);
+    return getKoreanDate(d);
+  })();
+  
   let yesterdayValues = { unrealizedPL: 0, cash: sum.cash, totalGain: 0, realizedPL: sum.realizedPL };
-  if (_cachedDaily && _cachedDaily.length > 1) {
-    const yesterday = _cachedDaily[_cachedDaily.length - 2]; // 2nd to last = yesterday
-    if (yesterday) {
-      // Yesterday's totalAsset from cache
-      const yTotalAsset = yesterday.totalValue || 0;
-      // Yesterday's cash = today's cash - today's cashFlowToday
+  if (_cachedDaily && _cachedDaily.length > 0) {
+    // Find yesterday's entry by date (not just 2nd-to-last)
+    const yesterdayEntry = _cachedDaily.find(d => d.date === yesterdayKST);
+    if (yesterdayEntry) {
+      const yTotalAsset = yesterdayEntry.totalValue || 0;
       yesterdayValues.cash = sum.cash - sum.cashFlowToday;
-      // Yesterday's totalGain = yTotalAsset - initialCash
       yesterdayValues.totalGain = yTotalAsset - initialCash;
-      // Yesterday's unrealizedPL = today's - mvChange (price move effect)
       yesterdayValues.unrealizedPL = sum.unrealizedPL - sum.mvChange;
-      // Yesterday's realizedPL = today's - today's change
       yesterdayValues.realizedPL = sum.realizedPL - sum.realizedPLToday;
     }
   }
@@ -2105,7 +2119,7 @@ async function recalcDailyValues() {
     });
 
     const fromDate = sorted[0].date;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = getKoreanToday();
 
     // Codes ever held with positive qty
     const everHeld = new Set();
@@ -2353,8 +2367,8 @@ async function autoCalcDailyValues() {
     if (!lastRow[0]) return;
     
     const lastDate = parseDate(lastRow[0]);
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const todayKST = getKoreanToday();
+    const today = parseDate(todayKST);
     
     // If lastDate is today or later, nothing to do
     if (lastDate >= today) return;
@@ -2370,10 +2384,10 @@ async function autoCalcDailyValues() {
     
     if (missingDays.length === 0) return;
     
-    // Calculate daily values for missing days
+    // Calculate daily values for missing days (use Korean dates)
     const newRows = [];
     for (const day of missingDays) {
-      const dateStr = day.toISOString().split('T')[0];
+      const dateStr = getKoreanDate(day);
       const txsUpToDate = state.transactions.filter(t => parseDate(t.date) <= day);
       const holds = computeHoldings(txsUpToDate);
       let totalValue = 0;
