@@ -1392,28 +1392,49 @@ async function drawTotalChart() {
         legend: { position: 'top', labels: { color: '#ccc', font: { size: 11 }, boxWidth: 12, boxHeight: 12 } },
         tooltip: {
           mode: 'index', intersect: false,
+          backgroundColor: 'rgba(0, 0, 0, 0.85)',
+          titleColor: '#fff',
+          titleFont: { size: 12, weight: '600', family: 'ui-sans-serif, system-ui, sans-serif' },
+          bodyColor: '#e5e5e5',
+          bodyFont: { size: 12, family: 'ui-monospace, monospace' },
+          borderColor: 'rgba(255, 255, 255, 0.1)',
+          borderWidth: 1,
+          padding: 10,
+          cornerRadius: 6,
+          displayColors: true,
+          boxWidth: 10,
+          boxHeight: 10,
           callbacks: {
             label: (tctx) => {
               const v = tctx.parsed.y;
               if (v == null) return '';
               const idx = tctx.dataIndex;
-              // Portfolio: normalized + 총수익 (totalGain = totalValue - initialCash)
+              // Portfolio: just "105.3 (+₩50.2만)" without label
               if (tctx.dataset.label === '내 포트폴리오' && series[idx]) {
                 const totalValue = series[idx].totalValue;
                 const initialCash = getInitialCashForBroker(state.activeBroker);
                 const totalGain = totalValue - initialCash;
-                return `${tctx.dataset.label}: ${v.toFixed(1)} (총수익 ${fmtManSigned(totalGain)})`;
+                return `${v.toFixed(1)} (${fmtManSigned(totalGain)})`;
               }
-              // Benchmark: normalized + raw value (₩ for ETF, plain number for indices)
+              // Benchmarks: short label + value + (raw) for indices only
               const raw = tctx.dataset._rawData ? tctx.dataset._rawData[idx] : null;
-              if (raw != null) {
-                const isEtf = tctx.dataset._code && !tctx.dataset._code.startsWith('^');
-                const rawStr = isEtf
-                  ? '₩' + Math.round(raw).toLocaleString('en-US')
-                  : raw.toLocaleString('en-US', { maximumFractionDigits: 1, minimumFractionDigits: 1 });
-                return `${tctx.dataset.label}: ${v.toFixed(1)} (${rawStr})`;
+              const code = tctx.dataset._code;
+              // Shorten benchmark labels
+              let shortLabel = tctx.dataset.label
+                .replace('KODEX', '')
+                .replace('반도체', '반도체')
+                .replace('KOSPI', '코스피')
+                .replace('KOSDAQ', '코스닥')
+                .trim();
+              
+              // For indices (starting with ^), show raw value
+              const isIndex = code && code.startsWith('^');
+              if (isIndex && raw != null) {
+                const rawStr = raw.toLocaleString('en-US', { maximumFractionDigits: 1, minimumFractionDigits: 1 });
+                return `${shortLabel}: ${v.toFixed(1)} (${rawStr})`;
               }
-              return `${tctx.dataset.label}: ${v.toFixed(1)}`;
+              // For ETFs, just normalized value (no raw price)
+              return `${shortLabel}: ${v.toFixed(1)}`;
             },
           },
         },
