@@ -219,7 +219,7 @@
 
 <div class="header">
   <div style="flex:1;min-width:0">
-    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v1.3</span></div>
+    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v1.4</span></div>
     <div style="font-size:11px;color:var(--text-dim);margin-top:2px;font-family:ui-monospace,monospace">
       <span id="verInfo">html-—</span> · <span id="priceInfo">시세-—</span>
     </div>
@@ -1150,7 +1150,53 @@ function renderOverview() {
     ${holdingsHtml}
   </div>`;
 
-  root.innerHTML = brokerTabs + cards + holdingsCard;
+  // Historic holdings: previously held, now qty == 0 (fully sold)
+  const historicCodes = Object.keys(holds).filter(c => holds[c].qty === 0 && !heldCodes.includes(c));
+  // Sort by absolute realized PL (most impactful first)
+  historicCodes.sort((a, b) => Math.abs(holds[b].realizedPL) - Math.abs(holds[a].realizedPL));
+
+  const historicHtml = historicCodes.length === 0 ? '' : `
+    <details class="card" style="padding:0;margin-top:12px">
+      <summary style="padding:12px 14px;cursor:pointer;list-style:none;display:flex;justify-content:space-between;align-items:center;user-select:none">
+        <span style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:12px;color:var(--text-faint)">▶</span>
+          <h2 style="margin:0;font-size:15px">📜 청산 종목 (${historicCodes.length})</h2>
+        </span>
+        <span style="font-size:11px;color:var(--text-faint)">과거 보유 · 현재 0주</span>
+      </summary>
+      <div class="hold-hdr" style="border-top:1px solid var(--border)">
+        <div>종목</div>
+        <div style="grid-column:span 3;text-align:left">실현 YTD / total</div>
+        <div></div>
+      </div>
+      ${historicCodes.map(code => {
+        const h = holds[code];
+        const name = state.names[code] || code;
+        return `
+          <div class="holding-row" onclick="selectTicker('${code}')" style="opacity:0.85">
+            <div class="hold-cell">
+              <div class="top">${escapeHtml(name)}</div>
+              <div class="bot" style="font-family:ui-monospace,monospace">${code}</div>
+            </div>
+            <div class="hold-cell" style="grid-column:span 3">
+              <div class="top" style="white-space:nowrap">
+                <span class="${plClass(h.realizedPLThisYear)}">${fmtManSigned(h.realizedPLThisYear, '')}</span>
+                <span class="text-faint">/</span>
+                <span class="${plClass(h.realizedPL)}">${fmtManSigned(h.realizedPL, '')}</span>
+              </div>
+            </div>
+            <div class="hold-cell"></div>
+          </div>
+        `;
+      }).join('')}
+    </details>
+    <style>
+      details > summary::-webkit-details-marker { display: none; }
+      details[open] > summary > span:first-child > span:first-child { transform: rotate(90deg); display: inline-block; }
+    </style>
+  `;
+
+  root.innerHTML = brokerTabs + cards + holdingsCard + historicHtml;
 }
 
 function pricesAsOfStr() {
