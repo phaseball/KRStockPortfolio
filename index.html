@@ -220,7 +220,7 @@
 <div class="header">
   <div style="flex:1;min-width:0">
     <div class="header-title">📈 국내주식 포트폴리오</div>
-    <div style="font-size:11px;color:var(--text-faint);margin-top:2px;font-family:ui-monospace,monospace">
+    <div style="font-size:11px;color:var(--text-dim);margin-top:2px;font-family:ui-monospace,monospace">
       <span id="verInfo">html-—</span> · <span id="priceInfo">시세-—</span>
     </div>
   </div>
@@ -409,6 +409,14 @@ function changeBadge(n) {
   if (n == null || isNaN(n) || Math.abs(n) < 100) return '';
   const tri = n > 0 ? '▲' : '▼';
   return ` <span class="change-badge ${plClass(n)}">${tri}${fmtMan(Math.abs(n))}</span>`;
+}
+// changeBadge with % — shows "▲₩X.X만 (+Y.Y%)" or just value if base is 0
+function changeBadgeWithPct(change, baseYesterday) {
+  if (change == null || isNaN(change) || Math.abs(change) < 100) return '';
+  const tri = change > 0 ? '▲' : '▼';
+  const pct = (baseYesterday && baseYesterday !== 0) ? (change / baseYesterday) : null;
+  const pctStr = pct !== null ? ` <span class="${plClass(pct)}" style="font-size:11px">(${fmtPct(pct)})</span>` : '';
+  return ` <span class="change-badge ${plClass(change)}">${tri}${fmtMan(Math.abs(change))}${pctStr}</span>`;
 }
 // "(d% / 1w%)" — colored, in parens; returns '' if no data
 function fmtChangePcts(priceObj) {
@@ -1008,24 +1016,42 @@ function renderOverview() {
   const earnPctTotal = initialCash > 0 ? sum.totalGain / initialCash : null;
   const cashPct = sum.totalAsset > 0 ? sum.cash / sum.totalAsset : null;
 
+  // Get yesterday's values for % change calculation
+  let yesterdayValues = { unrealizedPL: 0, cash: sum.cash, totalGain: 0, realizedPL: sum.realizedPL };
+  if (_cachedDaily && _cachedDaily.length > 1) {
+    const yesterday = _cachedDaily[_cachedDaily.length - 2]; // 2nd to last = yesterday
+    if (yesterday) {
+      // Yesterday's totalAsset from cache
+      const yTotalAsset = yesterday.totalValue || 0;
+      // Yesterday's cash = today's cash - today's cashFlowToday
+      yesterdayValues.cash = sum.cash - sum.cashFlowToday;
+      // Yesterday's totalGain = yTotalAsset - initialCash
+      yesterdayValues.totalGain = yTotalAsset - initialCash;
+      // Yesterday's unrealizedPL = today's - mvChange (price move effect)
+      yesterdayValues.unrealizedPL = sum.unrealizedPL - sum.mvChange;
+      // Yesterday's realizedPL = today's - today's change
+      yesterdayValues.realizedPL = sum.realizedPL - sum.realizedPLToday;
+    }
+  }
+
   const cards = `
     <div class="cards-grid">
       <div class="card summary-card">
         <div class="label">📈 평가손익 ${uplPctTotal !== null ? `<span class="${plClass(uplPctTotal)}">(${fmtPct(uplPctTotal)})</span>` : ''}</div>
         <div class="row2">
-          <div class="value ${plClass(sum.unrealizedPL)}" style="white-space:nowrap">${fmtManSigned(sum.unrealizedPL)}${changeBadge(sum.mvChange)}</div>
+          <div class="value ${plClass(sum.unrealizedPL)}" style="white-space:nowrap">${fmtManSigned(sum.unrealizedPL)}${changeBadgeWithPct(sum.mvChange, yesterdayValues.unrealizedPL)}</div>
           <div class="meta">평가&nbsp;${fmtMan(sum.marketValue)}<br>매수&nbsp;${fmtMan(sum.costBasis)}</div>
         </div>
       </div>
       <div class="card summary-card">
         <div class="label">💵 현금</div>
-        <div class="value" style="white-space:nowrap">${fmtMan(sum.cash)}${changeBadge(sum.cashFlowToday)}</div>
+        <div class="value" style="white-space:nowrap">${fmtMan(sum.cash)}${changeBadgeWithPct(sum.cashFlowToday, yesterdayValues.cash)}</div>
         <div class="sub">${cashPct !== null ? `(총자산의 ${(cashPct * 100).toFixed(0)}%)` : ''}</div>
       </div>
       <div class="card summary-card" onclick="showTotalChart()" style="cursor:pointer" title="클릭하면 총자산 히스토리 차트">
         <div class="label">💰 총수익 ${earnPctTotal !== null ? `<span class="${plClass(earnPctTotal)}">(${fmtPct(earnPctTotal)})</span>` : ''}</div>
         <div class="row2">
-          <div class="value ${plClass(sum.totalGain)}" style="white-space:nowrap">${fmtManSigned(sum.totalGain)}${changeBadge(sum.mvChange)}</div>
+          <div class="value ${plClass(sum.totalGain)}" style="white-space:nowrap">${fmtManSigned(sum.totalGain)}${changeBadgeWithPct(sum.totalGain - yesterdayValues.totalGain, yesterdayValues.totalGain)}</div>
           <div class="meta">자산&nbsp;${fmtMan(sum.totalAsset)}<br>초기&nbsp;${fmtMan(sum.initialCash)}</div>
         </div>
       </div>
@@ -1371,10 +1397,12 @@ async function drawTotalChart() {
               const v = tctx.parsed.y;
               if (v == null) return '';
               const idx = tctx.dataIndex;
-              // Portfolio: normalized + raw KRW (₩)
+              // Portfolio: normalized + 총수익 (totalGain = totalValue - initialCash)
               if (tctx.dataset.label === '내 포트폴리오' && series[idx]) {
-                const real = series[idx].totalValue;
-                return `${tctx.dataset.label}: ${v.toFixed(1)} (₩${fmtMan(real)})`;
+                const totalValue = series[idx].totalValue;
+                const initialCash = getInitialCashForBroker(state.activeBroker);
+                const totalGain = totalValue - initialCash;
+                return `${tctx.dataset.label}: ${v.toFixed(1)} (총수익 ${fmtManSigned(totalGain)})`;
               }
               // Benchmark: normalized + raw value (₩ for ETF, plain number for indices)
               const raw = tctx.dataset._rawData ? tctx.dataset._rawData[idx] : null;
@@ -2290,6 +2318,69 @@ async function refreshAll() {
   if (!isConfigured()) { toast('설정에서 JSON과 Sheet ID를 입력하세요', 'error'); switchTab('settings'); return; }
   await refreshTransactions();
   await refreshPrices();
+  // Auto-calculate daily values from last stored date to today
+  await autoCalcDailyValues();
+}
+
+async function autoCalcDailyValues() {
+  try {
+    // Get last date from daily_value sheet
+    const rows = await sheetGet(`${DAILY_TAB}!A:B`);
+    if (!rows || rows.length < 2) return; // No data yet, skip
+    
+    const lastRow = rows[rows.length - 1];
+    if (!lastRow[0]) return;
+    
+    const lastDate = parseDate(lastRow[0]);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    
+    // If lastDate is today or later, nothing to do
+    if (lastDate >= today) return;
+    
+    // Calculate missing days: lastDate+1 to today
+    const missingDays = [];
+    const d = new Date(lastDate);
+    d.setDate(d.getDate() + 1);
+    while (d <= today) {
+      missingDays.push(new Date(d));
+      d.setDate(d.getDate() + 1);
+    }
+    
+    if (missingDays.length === 0) return;
+    
+    // Calculate daily values for missing days
+    const newRows = [];
+    for (const day of missingDays) {
+      const dateStr = day.toISOString().split('T')[0];
+      const txsUpToDate = state.transactions.filter(t => parseDate(t.date) <= day);
+      const holds = computeHoldings(txsUpToDate);
+      let totalValue = 0;
+      for (const broker of BROKERS) {
+        const brokerTxs = txsUpToDate.filter(t => t.broker === broker);
+        const initialCash = state.initialCashByBroker[broker] || 0;
+        const sum = computeSummary(brokerTxs, holds, state.prices, initialCash);
+        totalValue += sum.totalAsset;
+      }
+      newRows.push([dateStr, totalValue]);
+    }
+    
+    // Append to sheet
+    if (newRows.length > 0) {
+      const token = await getAccessToken();
+      const range = `${DAILY_TAB}!A${rows.length + 1}`;
+      await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${state.sheetId}/values/${range}?valueInputOption=USER_ENTERED`, {
+        method: 'PUT',
+        headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ values: newRows }),
+      });
+      _cachedDaily = null; // Invalidate cache
+      console.log(`Auto-calculated ${newRows.length} daily values`);
+    }
+  } catch (e) {
+    console.warn('Auto-calc daily values failed:', e);
+    // Don't show error toast - this is background operation
+  }
 }
 
 function clearCache() {
