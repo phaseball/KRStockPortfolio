@@ -1030,7 +1030,7 @@ function renderOverview() {
   // Get yesterday's values for % change calculation (use Korean timezone)
   const todayKST = getKoreanToday();
   const yesterdayKST = (() => {
-    const d = parseDate(todayKST);
+    const d = new Date(todayKST + 'T00:00:00');
     d.setDate(d.getDate() - 1);
     return getKoreanDate(d);
   })();
