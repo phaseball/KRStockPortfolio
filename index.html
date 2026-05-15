@@ -219,7 +219,7 @@
 
 <div class="header">
   <div style="flex:1;min-width:0">
-    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v1.4</span></div>
+    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v1.5</span></div>
     <div style="font-size:11px;color:var(--text-dim);margin-top:2px;font-family:ui-monospace,monospace">
       <span id="verInfo">html-—</span> · <span id="priceInfo">시세-—</span>
     </div>
@@ -417,17 +417,21 @@ function todayKR() {
 }
 // "▲5.2만" (gain, red) or "▼3.1만" (loss, blue) inline badge for today's change.
 // Returns '' if value is near-zero (under 100원).
-function changeBadge(n) {
-  if (n == null || isNaN(n) || Math.abs(n) < 100) return '';
+function changeBadge(n, alwaysShow) {
+  if (n == null || isNaN(n)) return '';
+  if (!alwaysShow && Math.abs(n) < 100) return '';
+  if (n === 0) return ` <span class="change-badge text-faint">▬0</span>`;
   const tri = n > 0 ? '▲' : '▼';
   return ` <span class="change-badge ${plClass(n)}">${tri}${fmtMan(Math.abs(n))}</span>`;
 }
 // changeBadge with % — shows "▲₩X.X만 (+Y.Y%)" or just value if base is 0
-function changeBadgeWithPct(change, baseYesterday) {
-  if (change == null || isNaN(change) || Math.abs(change) < 100) return '';
-  const tri = change > 0 ? '▲' : '▼';
+function changeBadgeWithPct(change, baseYesterday, alwaysShow) {
+  if (change == null || isNaN(change)) return '';
+  if (!alwaysShow && Math.abs(change) < 100) return '';
   const pct = (baseYesterday && baseYesterday !== 0) ? (change / baseYesterday) : null;
   const pctStr = pct !== null ? ` <span class="${plClass(pct)}" style="font-size:11px">(${fmtPct(pct)})</span>` : '';
+  if (change === 0) return ` <span class="change-badge text-faint">▬0${pctStr}</span>`;
+  const tri = change > 0 ? '▲' : '▼';
   return ` <span class="change-badge ${plClass(change)}">${tri}${fmtMan(Math.abs(change))}${pctStr}</span>`;
 }
 // "(d% / 1w%)" — colored, in parens; returns '' if no data
@@ -1065,13 +1069,13 @@ function renderOverview() {
       <div class="card summary-card">
         <div class="label">📈 평가손익</div>
         <div class="row2">
-          <div class="value ${plClass(sum.unrealizedPL)}" style="white-space:nowrap">${fmtManSigned(sum.unrealizedPL)}${changeBadge(sum.mvChange)}</div>
+          <div class="value ${plClass(sum.unrealizedPL)}" style="white-space:nowrap">${fmtManSigned(sum.unrealizedPL)}${changeBadgeWithPct(sum.mvChange, sum.marketValue - sum.mvChange, true)}</div>
           <div class="meta">평가&nbsp;${fmtMan(sum.marketValue)}<br>매수&nbsp;${fmtMan(sum.costBasis)}</div>
         </div>
       </div>
       <div class="card summary-card">
         <div class="label">💵 현금</div>
-        <div class="value" style="white-space:nowrap">${fmtMan(sum.cash)}${changeBadge(sum.cashFlowToday)}</div>
+        <div class="value" style="white-space:nowrap">${fmtMan(sum.cash)}${changeBadgeWithPct(sum.cashFlowToday, yesterdayValues.totalAsset || sum.totalAsset, true)}</div>
         <div class="sub">${cashPct !== null ? `(총자산의 ${(cashPct * 100).toFixed(0)}%)` : ''}</div>
       </div>
       <div class="card summary-card" onclick="showTotalChart()" style="cursor:pointer" title="클릭하면 총자산 히스토리 차트">
@@ -1084,7 +1088,7 @@ function renderOverview() {
       <div class="card summary-card">
         <div class="label">📊 실현손익 YTD</div>
         <div class="row2">
-          <div class="value ${plClass(sum.realizedPLYTD)}" style="white-space:nowrap">${fmtManSigned(sum.realizedPLYTD)}${changeBadge(sum.realizedPLToday)}</div>
+          <div class="value ${plClass(sum.realizedPLYTD)}" style="white-space:nowrap">${fmtManSigned(sum.realizedPLYTD)}${changeBadge(sum.realizedPLToday, true)}</div>
           <div class="meta">total&nbsp;${fmtManSigned(sum.realizedPL)}</div>
         </div>
       </div>
