@@ -219,7 +219,7 @@
 
 <div class="header">
   <div style="flex:1;min-width:0">
-    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v1.5</span></div>
+    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v1.7</span></div>
     <div style="font-size:11px;color:var(--text-dim);margin-top:2px;font-family:ui-monospace,monospace">
       <span id="verInfo">html-—</span> · <span id="priceInfo">시세-—</span>
     </div>
@@ -257,11 +257,17 @@ const DAILY_TAB = 'daily_value_kr';
 // Build timestamp comes from document.lastModified (HTTP Last-Modified or file mtime).
 // No manual constant — getBuildTime() reads it dynamically at render.
 
-// KR brokerage fee model (2026, Samsung 증권 default; applied per row in input parser)
-//   매수/매도 브로커리지: 0.0150% of gross
+// KR brokerage fee model — observed per platform from actual data
+//   매수/매도 브로커리지: varies by platform (0% for 메리츠, 0.015% otherwise)
 //   ETF: 브로커리지만 (거래세/농특세 비과세)
-//   주식 매도: + 거래세 0.20% (= 거래세 0.05% 또는 0.18% + 농특세 0.15%, 시점에 따라)
-// Determined empirically from 삼성국내 PDF: 매수=0.0150%, 매도 ETF=0.0150%, 매도 주식=0.2150%.
+//   주식 매도: + 거래세 0.20% (regardless of platform — government tax)
+const FEE_RATES_BY_BROKER = {
+  '삼성국내': { brokerage: 0.00015, sellTaxStock: 0.00200 },
+  '키움국내': { brokerage: 0.00015, sellTaxStock: 0.00200 },
+  'ISA':      { brokerage: 0.00015, sellTaxStock: 0.00200 },
+  '메리츠국내': { brokerage: 0,       sellTaxStock: 0.00200 },
+};
+// Backward-compat constants (default = Samsung rates)
 const FEE_BROKERAGE = 0.00015;       // 0.0150%
 const FEE_TAX_STOCK_SELL = 0.00200;  // 0.20% (only stocks, only on sells)
 const ETF_PREFIXES = ['KODEX', 'TIGER', 'KBSTAR', 'ACE', 'KOSEF', 'ARIRANG', 'SOL', 'HANARO', 'PLUS', 'RISE', 'TIMEFOLIO', 'WOORI', 'TIMEFOLIO', 'TIME'];
@@ -1767,10 +1773,22 @@ function renderHistory() {
     .concat(codes.map(c => `<option value="${c}">${c} ${escapeHtml(state.names[c] || '')}</option>`))
     .join('');
 
+  // Broker tabs (matching overview design)
+  const brokerTabs = `
+    <div class="broker-tabs">
+      ${BROKERS.map(b => {
+        const c = state.transactions.filter(t => t.broker === b).length;
+        return `<button class="broker-tab ${state.activeBroker === b ? 'active' : ''}" onclick="setActiveBrokerHistory('${b}')">${b.replace('국내', '')} <span class="text-faint" style="font-weight:400;font-size:10px">${c}</span></button>`;
+      }).join('')}
+      <button class="broker-tab ${state.activeBroker === 'total' ? 'active' : ''}" onclick="setActiveBrokerHistory('total')">전체 <span class="text-faint" style="font-weight:400;font-size:10px">${state.transactions.length}</span></button>
+    </div>
+  `;
+
   root.innerHTML = `
+    ${brokerTabs}
     <div class="filter-bar">
-      <select id="filter-code" onchange="renderHistory()">${codeOpts}</select>
-      <select id="filter-dir" onchange="renderHistory()">
+      <select id="filter-code" onchange="applyHistoryFilter()">${codeOpts}</select>
+      <select id="filter-dir" onchange="applyHistoryFilter()">
         <option value="">매수+매도</option>
         <option value="buy">매수만</option>
         <option value="sell">매도만</option>
@@ -1781,7 +1799,7 @@ function renderHistory() {
       <div style="overflow-x:auto">
         <table class="history-table">
           <thead><tr>
-            <th>매매일</th><th>종목</th><th>구분</th><th>수량</th><th>단가</th><th>수수료</th><th>정산금액</th>
+            <th>매매일</th><th>계정</th><th>종목</th><th>구분</th><th>수량</th><th>단가</th><th>수수료</th><th>정산금액</th>
           </tr></thead>
           <tbody id="hist-body"></tbody>
         </table>
@@ -1789,20 +1807,25 @@ function renderHistory() {
     </div>
   `;
 
-  // Restore filter selections if any
-  const prevCode = document.getElementById('filter-code') ? document.getElementById('filter-code').value : '';
-  const prevDir = document.getElementById('filter-dir') ? document.getElementById('filter-dir').value : '';
-
   applyHistoryFilter();
+}
+
+// History-specific broker setter: updates state & re-renders history (keeps tabs in sync with overview)
+function setActiveBrokerHistory(broker) {
+  state.activeBroker = broker;
+  saveLocal();
+  renderHistory();
 }
 
 function applyHistoryFilter() {
   const codeSel = document.getElementById('filter-code');
   const dirSel = document.getElementById('filter-dir');
+  const broker = state.activeBroker && state.activeBroker !== 'total' ? state.activeBroker : '';
   const code = codeSel ? codeSel.value : '';
   const dir = dirSel ? dirSel.value : '';
 
   let rows = [...state.transactions].reverse();
+  if (broker) rows = rows.filter(t => t.broker === broker);
   if (code) rows = rows.filter(t => t.code === code);
   if (dir === 'buy') rows = rows.filter(t => t.qty > 0);
   if (dir === 'sell') rows = rows.filter(t => t.qty < 0);
@@ -1826,7 +1849,7 @@ function applyHistoryFilter() {
     const net = buyAmt - sellAmt;   // positive = net buy (red), negative = net sell (blue)
     html.push(`<tr class="day-summary">
       <td><b>${date}</b></td>
-      <td colspan="6" style="font-size:11px">
+      <td colspan="7" style="font-size:11px">
         <span class="gain">매수 ${buys.length}건 ${fmtMan(buyAmt, '')}</span>
         <span class="text-faint"> · </span>
         <span class="loss">매도 ${sells.length}건 ${fmtMan(sellAmt, '')}</span>
@@ -1839,6 +1862,7 @@ function applyHistoryFilter() {
     for (const t of buf) {
       html.push(`<tr style="cursor:pointer" onclick="state.selectedCode='${t.code}';switchTab('overview')">
         <td></td>
+        <td style="font-size:11px;color:var(--accent)">${escapeHtml((t.broker || '').replace('국내', ''))}</td>
         <td><span style="font-weight:600">${escapeHtml((state.names[t.code] || t.code).slice(0, 18))}</span> <span class="text-faint" style="font-size:11px">${t.code}</span></td>
         <td class="${t.qty > 0 ? 'gain' : 'loss'}">${t.qty > 0 ? '매수' : '매도'}</td>
         <td>${signed(t.qty)}</td>
@@ -1857,7 +1881,7 @@ function applyHistoryFilter() {
     buf.push(t);
   }
   flushDate();
-  if (rows.length > 500) html.push(`<tr><td colspan="7" style="text-align:center;color:var(--text-faint);padding:14px">… 처음 500건만 표시 (전체 ${rows.length}건)</td></tr>`);
+  if (rows.length > 500) html.push(`<tr><td colspan="8" style="text-align:center;color:var(--text-faint);padding:14px">… 처음 500건만 표시 (전체 ${rows.length}건)</td></tr>`);
   document.getElementById('hist-body').innerHTML = html.join('');
 }
 
@@ -1936,12 +1960,6 @@ function parseInputRows(text) {
     const price = Math.round(priceMan * 10000);
     const isBuy = qty > 0;
     const gross = price * Math.abs(qty);
-    // Brokerage applies to all (0.0150%)
-    const brokerage = Math.round(gross * FEE_BROKERAGE);
-    // Tax: only stock sells (KOSPI/KOSDAQ) — ETF sells are tax-exempt
-    const tax = (!isBuy && !isEtf) ? Math.round(gross * FEE_TAX_STOCK_SELL) : 0;
-    const fees = brokerage + tax;
-    const settle = isBuy ? gross + fees : gross - fees;
 
     // Validate broker name (currentAccount from #header)
     const broker = BROKERS.includes(currentAccount) ? currentAccount : null;
@@ -1949,6 +1967,15 @@ function parseInputRows(text) {
       errors.push(`${lineNum}행: 알 수 없는 계정 "${currentAccount}" (지원: ${BROKERS.join(', ')})`);
       return;
     }
+
+    // Per-broker fee rates
+    const rates = FEE_RATES_BY_BROKER[broker] || { brokerage: FEE_BROKERAGE, sellTaxStock: FEE_TAX_STOCK_SELL };
+    // Brokerage applies to all (varies by platform)
+    const brokerage = Math.round(gross * rates.brokerage);
+    // Tax: only stock sells (KOSPI/KOSDAQ) — ETF sells are tax-exempt
+    const tax = (!isBuy && !isEtf) ? Math.round(gross * rates.sellTaxStock) : 0;
+    const fees = brokerage + tax;
+    const settle = isBuy ? gross + fees : gross - fees;
 
     rows.push([broker, currentDate, code, price, qty, fees, settle, '']);
   });
@@ -2011,7 +2038,48 @@ function renderInput() {
         <br><span class="text-faint">• 가격은 만원 단위 (예: 17.32 = 173,200원)</span>
         <br><span class="text-faint">• 순번: 동일 날짜 내 거래 순서 (참고용)</span>
         <br><span class="text-faint">• 종목명은 <code>kr_names</code> 탭에 등록된 이름과 일치해야 함</span>
-        <br><span class="text-faint">• 수수료: 0.015% / 매도 주식 거래세: +0.20% (ETF는 거래세 비과세)</span>
+      </div>
+      <div style="margin-bottom:10px;border:1px solid var(--border);border-radius:6px;overflow:hidden">
+        <div style="padding:6px 10px;background:var(--bg);font-size:11px;color:var(--text-dim);font-weight:600">💰 계정별 수수료율 (설정값 vs 실측)</div>
+        <table style="width:100%;font-size:11px;border-collapse:collapse">
+          <thead><tr style="background:var(--bg);color:var(--text-dim)">
+            <th style="text-align:left;padding:5px 10px">계정</th>
+            <th style="text-align:right;padding:5px 10px">매수 (설정)</th>
+            <th style="text-align:right;padding:5px 10px;color:var(--accent)">매수 (실측)</th>
+            <th style="text-align:right;padding:5px 10px">매도 ETF (설정)</th>
+            <th style="text-align:right;padding:5px 10px">매도 주식 (설정)</th>
+            <th style="text-align:right;padding:5px 10px;color:var(--accent)">매도 (실측)</th>
+          </tr></thead>
+          <tbody>
+            ${BROKERS.map(b => {
+              const r = FEE_RATES_BY_BROKER[b] || { brokerage: FEE_BROKERAGE, sellTaxStock: FEE_TAX_STOCK_SELL };
+              const buyPct = (r.brokerage * 100).toFixed(4) + '%';
+              const sellEtfPct = (r.brokerage * 100).toFixed(4) + '%';
+              const sellStockPct = ((r.brokerage + r.sellTaxStock) * 100).toFixed(4) + '%';
+              // Actual measured rates from transactions
+              const txs = state.transactions.filter(t => t.broker === b);
+              const buys = txs.filter(t => t.qty > 0);
+              const sells = txs.filter(t => t.qty < 0);
+              const buyGross = buys.reduce((s, t) => s + (t.price * t.qty), 0);
+              const buyFee = buys.reduce((s, t) => s + (t.fee || 0), 0);
+              const sellGross = sells.reduce((s, t) => s + (t.price * Math.abs(t.qty)), 0);
+              const sellFee = sells.reduce((s, t) => s + (t.fee || 0), 0);
+              const actualBuyPct = buyGross > 0 ? (buyFee / buyGross * 100).toFixed(4) + '%' : '—';
+              const actualSellPct = sellGross > 0 ? (sellFee / sellGross * 100).toFixed(4) + '%' : '—';
+              return `<tr style="border-top:1px solid var(--border)">
+                <td style="padding:5px 10px;color:var(--accent);font-weight:600">${b}</td>
+                <td style="text-align:right;padding:5px 10px;font-family:ui-monospace,monospace">${buyPct}</td>
+                <td style="text-align:right;padding:5px 10px;font-family:ui-monospace,monospace;color:var(--accent)">${actualBuyPct} <span class="text-faint" style="font-size:10px">(${buys.length})</span></td>
+                <td style="text-align:right;padding:5px 10px;font-family:ui-monospace,monospace">${sellEtfPct}</td>
+                <td style="text-align:right;padding:5px 10px;font-family:ui-monospace,monospace">${sellStockPct}</td>
+                <td style="text-align:right;padding:5px 10px;font-family:ui-monospace,monospace;color:var(--accent)">${actualSellPct} <span class="text-faint" style="font-size:10px">(${sells.length})</span></td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+        <div style="padding:5px 10px;background:var(--bg);font-size:10px;color:var(--text-faint)">
+          ※ 실측 = 거래내역 기준 가중평균. 매도 주식 = 브로커리지 + 거래세 0.20%
+        </div>
       </div>
       <textarea id="input-textarea" rows="10" style="width:100%;padding:10px;font-family:ui-monospace,monospace;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;resize:vertical" placeholder="#삼성국내 260514&#10;삼성SDI,3,17.32,1"></textarea>
       <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
