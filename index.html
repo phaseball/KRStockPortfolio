@@ -307,6 +307,7 @@ const BENCH_TICKERS = [
 
 // In-memory caches for chart (not persisted)
 let _cachedDaily = null;
+let _dailyLoadingPromise = null;
 let _cachedBench = {};   // code → { 'YYYY-MM-DD': close }
 let _chartInstance = null;
 
@@ -1037,16 +1038,26 @@ function renderOverview() {
   
   let yesterdayValues = { unrealizedPL: 0, cash: sum.cash, totalGain: 0, realizedPL: sum.realizedPL, totalAsset: 0 };
   if (_cachedDaily && _cachedDaily.length > 0) {
-    // Find yesterday's entry by date (not just 2nd-to-last)
-    const yesterdayEntry = _cachedDaily.find(d => d.date === yesterdayKST);
-    if (yesterdayEntry) {
-      const yTotalAsset = yesterdayEntry.totalValue || 0;
+    // Use broker-aware yesterday value (handles 'total' AND per-broker views)
+    const yTotalAsset = computeYesterdayBrokerValue(state.activeBroker, yesterdayKST);
+    if (yTotalAsset != null) {
       yesterdayValues.totalAsset = yTotalAsset;
       yesterdayValues.cash = sum.cash - sum.cashFlowToday;
       yesterdayValues.totalGain = yTotalAsset - initialCash;
       yesterdayValues.unrealizedPL = sum.unrealizedPL - sum.mvChange;
       yesterdayValues.realizedPL = sum.realizedPL - sum.realizedPLToday;
     }
+  } else if (!_dailyLoadingPromise && isConfigured()) {
+    // Background load on first overview render so daily change is correct without
+    // requiring user to visit the value-history page first.
+    _dailyLoadingPromise = loadDailyValues().then(d => {
+      _cachedDaily = d;
+      _dailyLoadingPromise = null;
+      // Re-render overview now that yesterday data is available
+      if (state.currentTab === 'overview' && !state.selectedCode && !state.showTotalChart) {
+        renderOverview();
+      }
+    }).catch(() => { _dailyLoadingPromise = null; });
   }
 
   const cards = `
@@ -1222,10 +1233,16 @@ async function loadDailyValues() {
     for (let i = 1; i < rows.length; i++) {
       const r = rows[i];
       if (!r[0]) continue;
+      // Parse holdings + prices JSON (per-code data we need for per-broker yesterday value)
+      let holdings = null, prices = null;
+      try { if (r[3]) holdings = JSON.parse(r[3]); } catch (e) {}
+      try { if (r[4]) prices = JSON.parse(r[4]); } catch (e) {}
       out.push({
         date: parseDate(r[0]),
         totalValue: parseNum(r[1]),
         cash: parseNum(r[2]),
+        holdings: holdings,
+        prices: prices,
       });
     }
     out.sort((a, b) => a.date < b.date ? -1 : 1);
@@ -1233,6 +1250,37 @@ async function loadDailyValues() {
   } catch (e) {
     return [];
   }
+}
+
+// Compute yesterday's totalAsset for a specific broker (or 'total') using cached daily prices.
+// Returns null if yesterday's entry isn't available in cache.
+function computeYesterdayBrokerValue(broker, yesterdayKST) {
+  if (!_cachedDaily || !_cachedDaily.length) return null;
+  const yEntry = _cachedDaily.find(d => d.date === yesterdayKST);
+  if (!yEntry) return null;
+  // Total view: just use the stored totalValue
+  if (broker === 'total') return yEntry.totalValue || 0;
+  // Per-broker: need yesterday prices + broker's holdings as of end-of-yesterday
+  if (!yEntry.prices) return null;
+  const brokerTxs = getTxsForBroker(broker);
+  // Filter to txs with date <= yesterdayKST
+  const upToYesterday = brokerTxs.filter(t => t.date <= yesterdayKST);
+  // Compute broker's qty per code + broker's cash as of end-of-yesterday
+  const positions = {};
+  let cash = getInitialCashForBroker(broker);
+  for (const tx of upToYesterday) {
+    positions[tx.code] = (positions[tx.code] || 0) + tx.qty;
+    if (tx.qty > 0) cash -= tx.settle;
+    else cash += tx.settle;
+  }
+  // Market value using yesterday's closing prices
+  let marketValue = 0;
+  for (const code in positions) {
+    if (positions[code] <= 0) continue;
+    const p = yEntry.prices[code];
+    if (p) marketValue += positions[code] * p;
+  }
+  return cash + marketValue;
 }
 
 // Fetch full historical daily closes for a Yahoo symbol (indices supported with ^ prefix).
