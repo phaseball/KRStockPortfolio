@@ -1035,12 +1035,13 @@ function renderOverview() {
     return getKoreanDate(d);
   })();
   
-  let yesterdayValues = { unrealizedPL: 0, cash: sum.cash, totalGain: 0, realizedPL: sum.realizedPL };
+  let yesterdayValues = { unrealizedPL: 0, cash: sum.cash, totalGain: 0, realizedPL: sum.realizedPL, totalAsset: 0 };
   if (_cachedDaily && _cachedDaily.length > 0) {
     // Find yesterday's entry by date (not just 2nd-to-last)
     const yesterdayEntry = _cachedDaily.find(d => d.date === yesterdayKST);
     if (yesterdayEntry) {
       const yTotalAsset = yesterdayEntry.totalValue || 0;
+      yesterdayValues.totalAsset = yTotalAsset;
       yesterdayValues.cash = sum.cash - sum.cashFlowToday;
       yesterdayValues.totalGain = yTotalAsset - initialCash;
       yesterdayValues.unrealizedPL = sum.unrealizedPL - sum.mvChange;
@@ -1051,21 +1052,21 @@ function renderOverview() {
   const cards = `
     <div class="cards-grid">
       <div class="card summary-card">
-        <div class="label">📈 평가손익 ${uplPctTotal !== null ? `<span class="${plClass(uplPctTotal)}">(${fmtPct(uplPctTotal)})</span>` : ''}</div>
+        <div class="label">📈 평가손익</div>
         <div class="row2">
-          <div class="value ${plClass(sum.unrealizedPL)}" style="white-space:nowrap">${fmtManSigned(sum.unrealizedPL)}${changeBadgeWithPct(sum.mvChange, yesterdayValues.unrealizedPL)}</div>
+          <div class="value ${plClass(sum.unrealizedPL)}" style="white-space:nowrap">${fmtManSigned(sum.unrealizedPL)}${changeBadge(sum.mvChange)}</div>
           <div class="meta">평가&nbsp;${fmtMan(sum.marketValue)}<br>매수&nbsp;${fmtMan(sum.costBasis)}</div>
         </div>
       </div>
       <div class="card summary-card">
         <div class="label">💵 현금</div>
-        <div class="value" style="white-space:nowrap">${fmtMan(sum.cash)}${changeBadgeWithPct(sum.cashFlowToday, yesterdayValues.cash)}</div>
+        <div class="value" style="white-space:nowrap">${fmtMan(sum.cash)}${changeBadge(sum.cashFlowToday)}</div>
         <div class="sub">${cashPct !== null ? `(총자산의 ${(cashPct * 100).toFixed(0)}%)` : ''}</div>
       </div>
       <div class="card summary-card" onclick="showTotalChart()" style="cursor:pointer" title="클릭하면 총자산 히스토리 차트">
         <div class="label">💰 총수익 ${earnPctTotal !== null ? `<span class="${plClass(earnPctTotal)}">(${fmtPct(earnPctTotal)})</span>` : ''}</div>
         <div class="row2">
-          <div class="value ${plClass(sum.totalGain)}" style="white-space:nowrap">${fmtManSigned(sum.totalGain)}${changeBadgeWithPct(sum.totalGain - yesterdayValues.totalGain, yesterdayValues.totalGain)}</div>
+          <div class="value ${plClass(sum.totalGain)}" style="white-space:nowrap">${fmtManSigned(sum.totalGain)}${changeBadgeWithPct(sum.totalGain - yesterdayValues.totalGain, yesterdayValues.totalAsset)}</div>
           <div class="meta">자산&nbsp;${fmtMan(sum.totalAsset)}<br>초기&nbsp;${fmtMan(sum.initialCash)}</div>
         </div>
       </div>
@@ -1454,6 +1455,35 @@ async function drawTotalChart() {
         },
       },
     },
+    plugins: [{
+      id: 'endValueLabels',
+      afterDatasetsDraw(chart) {
+        const ctx = chart.ctx;
+        ctx.save();
+        ctx.font = '11px ui-monospace, monospace';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        
+        chart.data.datasets.forEach((dataset, i) => {
+          const meta = chart.getDatasetMeta(i);
+          if (!meta.visible || !dataset.data.length) return;
+          
+          const lastPoint = meta.data[meta.data.length - 1];
+          if (!lastPoint) return;
+          
+          const value = dataset.data[dataset.data.length - 1];
+          if (value == null) return;
+          
+          const x = lastPoint.x + 5;
+          const y = lastPoint.y;
+          
+          ctx.fillStyle = dataset.borderColor || '#ccc';
+          ctx.fillText(value.toFixed(1), x, y);
+        });
+        
+        ctx.restore();
+      }
+    }],
   });
 
   const startD = series[0].date;
