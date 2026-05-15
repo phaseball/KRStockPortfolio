@@ -1391,6 +1391,7 @@ async function drawTotalChart() {
       maintainAspectRatio: false,
       animation: false,
       interaction: { mode: 'index', intersect: false },
+      layout: { padding: { right: 60 } },
       scales: {
         x: {
           type: 'category',
@@ -1460,25 +1461,65 @@ async function drawTotalChart() {
       afterDatasetsDraw(chart) {
         const ctx = chart.ctx;
         ctx.save();
-        ctx.font = '11px ui-monospace, monospace';
+        ctx.font = 'bold 11px ui-monospace, monospace';
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
         
+        // Collect last points with values, avoid overlap by sorting & shifting
+        const labels = [];
         chart.data.datasets.forEach((dataset, i) => {
           const meta = chart.getDatasetMeta(i);
           if (!meta.visible || !dataset.data.length) return;
           
-          const lastPoint = meta.data[meta.data.length - 1];
+          // Find LAST non-null value
+          let lastIdx = dataset.data.length - 1;
+          while (lastIdx >= 0 && dataset.data[lastIdx] == null) lastIdx--;
+          if (lastIdx < 0) return;
+          
+          const lastPoint = meta.data[lastIdx];
           if (!lastPoint) return;
           
-          const value = dataset.data[dataset.data.length - 1];
-          if (value == null) return;
+          const value = dataset.data[lastIdx];
+          labels.push({
+            x: lastPoint.x,
+            y: lastPoint.y,
+            value: value,
+            color: dataset.borderColor || '#ccc',
+          });
+        });
+        
+        // Sort by y to detect overlap & shift
+        labels.sort((a, b) => a.y - b.y);
+        const minGap = 14;
+        for (let i = 1; i < labels.length; i++) {
+          if (labels[i].y - labels[i-1].y < minGap) {
+            labels[i].y = labels[i-1].y + minGap;
+          }
+        }
+        
+        // Draw labels with background pill
+        labels.forEach(lbl => {
+          const text = lbl.value.toFixed(1);
+          const textW = ctx.measureText(text).width;
+          const padX = 5, padY = 3;
+          const boxX = lbl.x + 6;
+          const boxY = lbl.y - 8;
+          const boxW = textW + padX*2;
+          const boxH = 16;
           
-          const x = lastPoint.x + 5;
-          const y = lastPoint.y;
+          // Background pill
+          ctx.fillStyle = 'rgba(0,0,0,0.6)';
+          ctx.beginPath();
+          if (ctx.roundRect) {
+            ctx.roundRect(boxX, boxY, boxW, boxH, 4);
+          } else {
+            ctx.rect(boxX, boxY, boxW, boxH);
+          }
+          ctx.fill();
           
-          ctx.fillStyle = dataset.borderColor || '#ccc';
-          ctx.fillText(value.toFixed(1), x, y);
+          // Text
+          ctx.fillStyle = lbl.color;
+          ctx.fillText(text, boxX + padX, lbl.y);
         });
         
         ctx.restore();
