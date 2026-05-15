@@ -219,7 +219,7 @@
 
 <div class="header">
   <div style="flex:1;min-width:0">
-    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v1.2</span></div>
+    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v1.3</span></div>
     <div style="font-size:11px;color:var(--text-dim);margin-top:2px;font-family:ui-monospace,monospace">
       <span id="verInfo">html-—</span> · <span id="priceInfo">시세-—</span>
     </div>
@@ -249,7 +249,7 @@
 <script>
 // ============ CONFIG ============
 const STORAGE_KEY = 'kr_tracker_v1';
-const BROKERS = ['삼성국내', '키움국내', '메리츠국내'];
+const BROKERS = ['삼성국내', '키움국내', 'ISA', '메리츠국내'];
 const TX_TAB = BROKERS[0];   // default/legacy
 const NAMES_TAB = 'kr_names';
 const CONFIG_TAB = 'config_kr';
@@ -281,7 +281,7 @@ let state = {
   saKey: null,         // parsed Service Account JSON
   saKeyRaw: '',        // raw JSON string for re-display
   sheetId: '',
-  initialCashByBroker: { '삼성국내': 0, '키움국내': 0, '메리츠국내': 0 },
+  initialCashByBroker: { '삼성국내': 0, '키움국내': 0, 'ISA': 0, '메리츠국내': 0 },
   accessToken: null,
   tokenExpiry: 0,
   transactions: [],    // ALL brokers combined; each tx has .broker tag
@@ -336,7 +336,7 @@ function loadLocal() {
       }
       // Migrate legacy state.initialCash → state.initialCashByBroker['삼성국내']
       if (p.initialCash && !p.initialCashByBroker) {
-        state.initialCashByBroker = { '삼성국내': p.initialCash, '키움국내': 0, '메리츠국내': 0 };
+        state.initialCashByBroker = { '삼성국내': p.initialCash, '키움국내': 0, 'ISA': 0, '메리츠국내': 0 };
       }
       // Ensure all broker keys exist
       for (const b of BROKERS) {
