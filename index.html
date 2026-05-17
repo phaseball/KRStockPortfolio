@@ -219,7 +219,7 @@
 
 <div class="header">
   <div style="flex:1;min-width:0">
-    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v1.8</span></div>
+    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v1.9</span></div>
     <div style="font-size:11px;color:var(--text-dim);margin-top:2px;font-family:ui-monospace,monospace">
       <span id="verInfo">html-—</span> · <span id="priceInfo">시세-—</span>
     </div>
@@ -1803,6 +1803,7 @@ function drawTickerChart(code) {
 }
 
 function renderTickerDetail(code) {
+  const root = document.getElementById('tab-overview');
   const name = state.names[code] || code;
   const txs = state.transactions.filter(t => t.code === code);
   const holds = computeHoldings(state.transactions);
@@ -1844,6 +1845,14 @@ function renderTickerDetail(code) {
     const splitBadge = t.splitRaw ? ` <span style="color:var(--warn);font-size:10px">[split ${escapeHtml(t.splitRaw)}]</span>` : '';
     const qtyCell = t.splitRaw ? `${signed(t.qty)}<br><span class="text-faint" style="font-size:10px">(원본 ${signed(t.origQty)})</span>` : signed(t.qty);
     const priceCell = t.splitRaw ? `${fmtMan3(t.price)}<br><span class="text-faint" style="font-size:10px">(원본 ${fmtMan3(t.origPrice)})</span>` : fmtMan3(t.price);
+    // 평가금액: market value of position AFTER this transaction, using that day's closing price if cached, else trade price
+    let valPrice = t.price;
+    if (_cachedDaily && _cachedDaily.length) {
+      const day = _cachedDaily.find(d => d.date === t.date);
+      if (day && day.prices && day.prices[code]) valPrice = day.prices[code];
+    }
+    const positionValue = t.runningQty > 0 ? t.runningQty * valPrice : 0;
+    const valueCell = t.runningQty > 0 ? fmtMan3(positionValue) : '<span class="text-faint">—</span>';
     return `
     <tr>
       <td>${t.date}${splitBadge}</td>
@@ -1853,6 +1862,7 @@ function renderTickerDetail(code) {
       <td>${fmtMan3(t.fees)}</td>
       <td>${fmtMan3(t.settle)}</td>
       <td><b>${t.runningQty.toString()}</b></td>
+      <td>${valueCell}</td>
     </tr>
   `;
   }).join('');
@@ -1881,7 +1891,7 @@ function renderTickerDetail(code) {
         <div style="font-size:11px">${matchHint}</div>
       </div>
       <div style="overflow-x:auto"><table class="history-table">
-        <thead><tr><th>매매일</th><th>구분</th><th>수량</th><th>단가</th><th>수수료</th><th>정산금액</th><th>누적</th></tr></thead>
+        <thead><tr><th>매매일</th><th>구분</th><th>수량</th><th>단가</th><th>수수료</th><th>정산금액</th><th>누적</th><th>평가금액</th></tr></thead>
         <tbody>${rows}</tbody>
       </table></div>
     </div>
