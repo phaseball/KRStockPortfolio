@@ -219,7 +219,7 @@
 
 <div class="header">
   <div style="flex:1;min-width:0">
-    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v1.7</span></div>
+    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v1.8</span></div>
     <div style="font-size:11px;color:var(--text-dim);margin-top:2px;font-family:ui-monospace,monospace">
       <span id="verInfo">html-—</span> · <span id="priceInfo">시세-—</span>
     </div>
@@ -1680,8 +1680,129 @@ function renderChartSummary(periodSeries) {
   `;
 }
 
+// Per-ticker time series: walks transactions chronologically using each daily-cache
+// date to produce running cost/marketValue/unrealizedPL/realizedPL/totalPL/price arrays.
+// Matches computeHoldings() logic exactly: moving-average cost, fees applied to realized PL.
+function computeTickerTimeSeries(code) {
+  if (!_cachedDaily || !_cachedDaily.length) return null;
+  const txs = state.transactions
+    .filter(t => t.code === code)
+    .slice()
+    .sort((a, b) => a.date < b.date ? -1 : (a.date > b.date ? 1 : 0));
+  if (!txs.length) return null;
+
+  const dailySorted = [..._cachedDaily].slice().sort((a, b) => a.date < b.date ? -1 : 1);
+  const firstTxDate = txs[0].date;
+
+  let qty = 0, avgCost = 0, realizedPL = 0, txIdx = 0;
+  const out = { dates: [], cost: [], marketValue: [], unrealizedPL: [], realizedPL: [], totalPL: [], price: [] };
+
+  for (const entry of dailySorted) {
+    if (entry.date < firstTxDate) continue;
+    // Process all transactions on or before this date
+    while (txIdx < txs.length && txs[txIdx].date <= entry.date) {
+      const tx = txs[txIdx];
+      if (tx.qty > 0) {
+        const newCost = avgCost * qty + tx.qty * tx.price;
+        qty += tx.qty;
+        avgCost = qty > 0 ? newCost / qty : 0;
+      } else if (tx.qty < 0) {
+        const sellQty = -tx.qty;
+        const pl = sellQty * (tx.price - avgCost) - (tx.fees || 0);
+        realizedPL += pl;
+        qty -= sellQty;
+        if (qty <= 0) { qty = 0; avgCost = 0; }
+      }
+      txIdx++;
+    }
+    const price = entry.prices ? entry.prices[code] : null;
+    const cost = qty * avgCost;
+    const mv = (qty > 0 && price) ? qty * price : 0;
+    const upl = mv - cost;
+    out.dates.push(entry.date);
+    out.cost.push(cost);
+    out.marketValue.push(mv);
+    out.unrealizedPL.push(upl);
+    out.realizedPL.push(realizedPL);
+    out.totalPL.push(realizedPL + upl);
+    out.price.push(price);
+  }
+  return out;
+}
+
+let _tickerChartInstance = null;
+function drawTickerChart(code) {
+  const canvas = document.getElementById('tickerChartCanvas');
+  if (!canvas) return;
+  if (_tickerChartInstance) { _tickerChartInstance.destroy(); _tickerChartInstance = null; }
+
+  const series = computeTickerTimeSeries(code);
+  const placeholder = document.getElementById('tickerChartPlaceholder');
+  if (!series || !series.dates.length) {
+    if (placeholder) placeholder.textContent = _cachedDaily ? '데이터 없음' : 'daily_value_kr 로딩 중...';
+    // If daily cache isn't loaded yet, trigger load + retry
+    if (!_cachedDaily && !_dailyLoadingPromise && isConfigured()) {
+      _dailyLoadingPromise = loadDailyValues().then(d => {
+        _cachedDaily = d;
+        _dailyLoadingPromise = null;
+        if (state.selectedCode === code) drawTickerChart(code);
+      }).catch(() => { _dailyLoadingPromise = null; });
+    }
+    return;
+  }
+  if (placeholder) placeholder.style.display = 'none';
+
+  const ctx = canvas.getContext('2d');
+  // Y-axis tick formatter: 만 unit
+  const fmtMan = v => {
+    if (v == null) return '';
+    const m = v / 10000;
+    if (Math.abs(m) >= 10000) return (m / 10000).toFixed(1) + '억';
+    if (Math.abs(m) >= 1) return Math.round(m).toLocaleString() + '만';
+    return Math.round(v).toLocaleString();
+  };
+
+  _tickerChartInstance = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: series.dates,
+      datasets: [
+        { label: '매수',     data: series.cost,         borderColor: '#9ca3af', backgroundColor: 'transparent', borderWidth: 1.5, borderDash: [4,3], pointRadius: 0, yAxisID: 'y' },
+        { label: '평가',     data: series.marketValue,  borderColor: '#06b6d4', backgroundColor: 'transparent', borderWidth: 2,                       pointRadius: 0, yAxisID: 'y' },
+        { label: '평가손익', data: series.unrealizedPL, borderColor: '#10b981', backgroundColor: 'transparent', borderWidth: 1.5,                     pointRadius: 0, yAxisID: 'y' },
+        { label: '실현손익', data: series.realizedPL,   borderColor: '#f59e0b', backgroundColor: 'transparent', borderWidth: 1.5,                     pointRadius: 0, yAxisID: 'y' },
+        { label: '총손익',   data: series.totalPL,      borderColor: '#84cc16', backgroundColor: 'transparent', borderWidth: 2.5,                     pointRadius: 0, yAxisID: 'y' },
+        { label: '주가',     data: series.price,        borderColor: '#ec4899', backgroundColor: 'transparent', borderWidth: 1.5, borderDash: [2,2], pointRadius: 0, yAxisID: 'y1', spanGaps: true },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { mode: 'index', intersect: false },
+      layout: { padding: { right: 8 } },
+      scales: {
+        x: { ticks: { maxTicksLimit: 8, color: '#9ca3af', font: { size: 10 } }, grid: { color: 'rgba(255,255,255,0.04)' } },
+        y:  { position: 'left',  ticks: { callback: fmtMan, color: '#9ca3af', font: { size: 10 } }, grid: { color: 'rgba(255,255,255,0.06)' } },
+        y1: { position: 'right', ticks: { callback: fmtMan, color: '#ec4899', font: { size: 10 } }, grid: { drawOnChartArea: false } },
+      },
+      plugins: {
+        legend: { position: 'top', labels: { color: '#d1d5db', font: { size: 11 }, boxWidth: 12, padding: 8 } },
+        tooltip: {
+          callbacks: {
+            label: (item) => {
+              const v = item.parsed.y;
+              if (v == null) return `${item.dataset.label}: —`;
+              return `${item.dataset.label}: ${Math.round(v).toLocaleString()} 원`;
+            },
+          },
+        },
+      },
+    },
+  });
+}
+
 function renderTickerDetail(code) {
-  const root = document.getElementById('tab-overview');
   const name = state.names[code] || code;
   const txs = state.transactions.filter(t => t.code === code);
   const holds = computeHoldings(state.transactions);
@@ -1747,6 +1868,13 @@ function renderTickerDetail(code) {
     <h2 style="font-size:18px;margin-bottom:4px">${escapeHtml(name)}</h2>
     <div style="font-size:12px;color:var(--text-faint);font-family:ui-monospace,monospace;margin-bottom:16px">${code}</div>
     ${summary}
+    <div class="card" style="padding:12px;margin-bottom:12px;position:relative">
+      <h2 style="margin:0 0 8px 0;font-size:15px">📊 종목 히스토리</h2>
+      <div style="height:340px;position:relative">
+        <canvas id="tickerChartCanvas"></canvas>
+        <div id="tickerChartPlaceholder" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--text-faint);font-size:12px;pointer-events:none"></div>
+      </div>
+    </div>
     <div class="card" style="padding:0">
       <div style="padding:12px 14px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
         <h2 style="margin:0">거래내역 (${txsForCode.length})</h2>
@@ -1758,6 +1886,8 @@ function renderTickerDetail(code) {
       </table></div>
     </div>
   `;
+  // Draw the chart after the DOM is in place
+  setTimeout(() => drawTickerChart(code), 0);
 }
 
 function renderHistory() {
