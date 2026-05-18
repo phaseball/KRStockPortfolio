@@ -223,7 +223,7 @@
 
 <div class="header">
   <div style="flex:1;min-width:0">
-    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v2.4</span></div>
+    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v2.5</span></div>
     <div style="font-size:11px;color:var(--text-dim);margin-top:2px;font-family:ui-monospace,monospace">
       <span id="verInfo">html-—</span> · <span id="priceInfo">시세-—</span>
     </div>
@@ -1349,22 +1349,35 @@ function computeYesterdayBrokerValue(broker, yesterdayKST) {
   if (!_cachedDaily || !_cachedDaily.length) return null;
   const yEntry = _cachedDaily.find(d => d.date === yesterdayKST);
   if (!yEntry) return null;
-  // Total view: just use the stored totalValue
-  if (broker === 'total') return yEntry.totalValue || 0;
-  // Per-broker: need yesterday prices + broker's holdings as of end-of-yesterday
-  if (!yEntry.prices) return null;
-  const brokerTxs = getTxsForBroker(broker);
-  // Filter to txs with date <= yesterdayKST
-  const upToYesterday = brokerTxs.filter(t => t.date <= yesterdayKST);
-  // Compute broker's qty per code + broker's cash as of end-of-yesterday
+  // 'total' view = full stored totalValue MINUS ISA's yesterday value.
+  // We subtract at display time so the sheet stays format-stable (sum of all brokers).
+  if (broker === 'total') {
+    const full = yEntry.totalValue;
+    if (full == null) return null;
+    // Try to subtract ISA. If we can't (e.g., prices column missing for old rows), fall back
+    // to the full total - good enough to avoid the "full value" daily-change bug, even if the
+    // change is slightly off by ISA's daily movement.
+    if (yEntry.prices) {
+      const isaVal = computePerBrokerYesterdayValue('ISA', yEntry, yesterdayKST);
+      if (isaVal != null) return full - isaVal;
+    }
+    return full;
+  }
+  // Per-broker (including ISA): compute from positions + yesterday's prices in the sheet.
+  return computePerBrokerYesterdayValue(broker, yEntry, yesterdayKST);
+}
+
+// Compute end-of-yesterday totalAsset for a specific broker using yEntry's prices snapshot.
+function computePerBrokerYesterdayValue(broker, yEntry, yesterdayKST) {
+  if (!yEntry || !yEntry.prices) return null;
+  const brokerTxs = state.transactions.filter(t => t.broker === broker && t.date <= yesterdayKST);
   const positions = {};
-  let cash = getInitialCashForBroker(broker);
-  for (const tx of upToYesterday) {
+  let cash = state.initialCashByBroker[broker] || 0;
+  for (const tx of brokerTxs) {
     positions[tx.code] = (positions[tx.code] || 0) + tx.qty;
     if (tx.qty > 0) cash -= tx.settle;
     else cash += tx.settle;
   }
-  // Market value using yesterday's closing prices
   let marketValue = 0;
   for (const code in positions) {
     if (positions[code] <= 0) continue;
@@ -2526,13 +2539,12 @@ async function recalcDailyValues() {
   if (!confirm(`daily_value_kr 탭을 전체 재계산합니다.\n시세 API 호출에 ~30초~2분 소요. 계속?`)) return;
 
   try {
-    // 'total' aggregate excludes ISA (shown separately in its own tab) -- so the
-    // sheet's totalValue column reflects 삼성 + 키움 + 메리츠 only. ISA daily values
-    // are recomputed live from yEntry.prices when the user is on the ISA tab.
-    const allTxs = state.transactions.filter(t => t.broker !== 'ISA');
-    if (!allTxs.length) { toast('거래내역 없음 (ISA 제외) — 먼저 새로고침', 'error'); return; }
+    // Process ALL transactions (including ISA) so the sheet's prices column has every code.
+    // The 'total' view's ISA-exclusion is applied at display time (in renderOverview) by
+    // subtracting ISA's yesterday value from yEntry.totalValue. This keeps the sheet schema
+    // compatible with old data + makes ISA's own daily change calculable from yEntry.prices.
     // Sort with buys-first within same date (matches computeHoldings ordering)
-    const sorted = [...allTxs].sort((a, b) => {
+    const sorted = [...state.transactions].sort((a, b) => {
       if (a.date !== b.date) return a.date < b.date ? -1 : 1;
       const aIsBuy = a.qty > 0 ? 0 : 1;
       const bIsBuy = b.qty > 0 ? 0 : 1;
@@ -2833,8 +2845,9 @@ async function autoCalcDailyValues() {
 
       let totalValue = 0;
       let totalCash = 0;
-      // 'total' aggregate excludes ISA (shown separately) - see getTxsForBroker
-      for (const broker of BROKERS.filter(b => b !== 'ISA')) {
+      // Process ALL brokers (including ISA) so the prices column has every code.
+      // The 'total' view's ISA-exclusion is applied at display time, not at write time.
+      for (const broker of BROKERS) {
         const brokerTxs = txsUpToDate.filter(t => t.broker === broker);
         const initialCash = state.initialCashByBroker[broker] || 0;
         const sum = computeSummary(brokerTxs, holds, state.prices, initialCash);
@@ -2917,8 +2930,21 @@ window.addEventListener('load', () => {
   updateHeaderInfo();
   // Auto-load on startup if configured
   if (isConfigured() && state.transactions.length > 0) {
-    // We have cached data — just refresh prices in background
-    setTimeout(() => refreshPrices().catch(() => {}), 500);
+    // We have cached transactions — but still need to load _cachedDaily BEFORE rendering
+    // so daily-change badges show correct yesterday values on the first render.
+    setTimeout(async () => {
+      try {
+        if (!_cachedDaily) {
+          _cachedDaily = await loadDailyValues();
+          // Re-render now that yesterday data is available (before prices come in)
+          if (state.currentTab === 'overview' && !state.selectedCode && !state.showTotalChart) {
+            renderOverview();
+          }
+        }
+        await refreshPrices();
+        await autoCalcDailyValues();
+      } catch (e) { console.warn('Startup load failed:', e); }
+    }, 500);
   } else if (isConfigured()) {
     setTimeout(() => refreshAll().catch(() => {}), 500);
   }
