@@ -89,7 +89,8 @@
   .change-badge { font-size: 11px; font-weight: 500; margin-left: 6px; vertical-align: baseline; }
 
   /* Broker switcher (4 sub-tabs in 개요) */
-  .broker-tabs { display: flex; gap: 2px; margin-bottom: 14px; border-bottom: 1px solid var(--border); }
+  .broker-tabs { display: flex; gap: 2px; margin-bottom: 14px; border-bottom: 1px solid var(--border); align-items: stretch; }
+  .broker-tab-gap { width: 14px; flex-shrink: 0; }
   .broker-tab {
     padding: 8px 14px; background: transparent; border: 0; border-bottom: 2px solid transparent;
     color: var(--text-dim); cursor: pointer; font-size: 13px; font-weight: 500;
@@ -222,7 +223,7 @@
 
 <div class="header">
   <div style="flex:1;min-width:0">
-    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v2.3</span></div>
+    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v2.4</span></div>
     <div style="font-size:11px;color:var(--text-dim);margin-top:2px;font-family:ui-monospace,monospace">
       <span id="verInfo">html-—</span> · <span id="priceInfo">시세-—</span>
     </div>
@@ -356,13 +357,15 @@ function loadLocal() {
 }
 
 // Per-broker helpers
+// 'total' = aggregate of NON-ISA brokers (ISA is a tax-favored account and shown separately
+// after 전체). To still see ISA, switch to the ISA tab.
 function getTxsForBroker(broker) {
-  if (broker === 'total') return state.transactions;
+  if (broker === 'total') return state.transactions.filter(t => t.broker !== 'ISA');
   return state.transactions.filter(t => t.broker === broker);
 }
 function getInitialCashForBroker(broker) {
   if (broker === 'total') {
-    return BROKERS.reduce((s, b) => s + (state.initialCashByBroker[b] || 0), 0);
+    return BROKERS.filter(b => b !== 'ISA').reduce((s, b) => s + (state.initialCashByBroker[b] || 0), 0);
   }
   return state.initialCashByBroker[broker] || 0;
 }
@@ -444,7 +447,7 @@ function todayKR() {
 function changeBadge(n, alwaysShow) {
   if (n == null || isNaN(n)) return '';
   if (!alwaysShow && Math.abs(n) < 100) return '';
-  if (n === 0) return ` <span class="change-badge text-faint">▬0</span>`;
+  if (n === 0) return ` <span class="change-badge text-faint">▲0</span>`;
   const tri = n > 0 ? '▲' : '▼';
   return ` <span class="change-badge ${plClass(n)}">${tri}${fmtMan(Math.abs(n))}</span>`;
 }
@@ -454,7 +457,7 @@ function changeBadgeWithPct(change, baseYesterday, alwaysShow) {
   if (!alwaysShow && Math.abs(change) < 100) return '';
   const pct = (baseYesterday && baseYesterday !== 0) ? (change / baseYesterday) : null;
   const pctStr = pct !== null ? ` <span class="${plClass(pct)}" style="font-size:11px">(${fmtPct(pct)})</span>` : '';
-  if (change === 0) return ` <span class="change-badge text-faint">▬0${pctStr}</span>`;
+  if (change === 0) return ` <span class="change-badge text-faint">▲0${pctStr}</span>`;
   const tri = change > 0 ? '▲' : '▼';
   return ` <span class="change-badge ${plClass(change)}">${tri}${fmtMan(Math.abs(change))}${pctStr}</span>`;
 }
@@ -1028,11 +1031,13 @@ function renderOverview() {
   // Broker switcher: 삼성국내 / 키움국내 / 메리츠국내 / 전체
   const brokerTabs = `
     <div class="broker-tabs">
-      ${BROKERS.map(b => {
+      ${BROKERS.filter(b => b !== 'ISA').map(b => {
         const c = state.transactions.filter(t => t.broker === b).length;
         return `<button class="broker-tab ${state.activeBroker === b ? 'active' : ''}" onclick="setActiveBroker('${b}')">${b.replace('국내', '')} <span class="text-faint" style="font-weight:400;font-size:10px">${c}</span></button>`;
       }).join('')}
-      <button class="broker-tab ${state.activeBroker === 'total' ? 'active' : ''}" onclick="setActiveBroker('total')">전체 <span class="text-faint" style="font-weight:400;font-size:10px">${state.transactions.length}</span></button>
+      <button class="broker-tab ${state.activeBroker === 'total' ? 'active' : ''}" onclick="setActiveBroker('total')">전체 <span class="text-faint" style="font-weight:400;font-size:10px">${state.transactions.filter(t => t.broker !== 'ISA').length}</span></button>
+      <div class="broker-tab-gap"></div>
+      <button class="broker-tab ${state.activeBroker === 'ISA' ? 'active' : ''}" onclick="setActiveBroker('ISA')">ISA <span class="text-faint" style="font-weight:400;font-size:10px">${state.transactions.filter(t => t.broker === 'ISA').length}</span></button>
     </div>
   `;
 
@@ -1107,12 +1112,33 @@ function renderOverview() {
     </div>
   `;
 
+  // Group related ETFs together (e.g., 코스피+레버리지 form one KOSPI group).
+  // Group total weight determines outer ordering; within a group, by weight desc.
+  function getStockGroup(code) {
+    const name = state.names[code] || '';
+    if (name === 'KODEX 코스피' || name === 'KODEX 레버리지') return '__KOSPI__';
+    if (name === 'KODEX 반도체' || name === 'KODEX 반도체레버리지') return '__SEMI__';
+    if (/나스닥100.*레버리지/.test(name)) return '__NASDAQ100_LEV__';
+    if (/S&P\s*500.*레버리지/i.test(name)) return '__SP500_LEV__';
+    return code; // each ungrouped stock is its own "group"
+  }
+
   // Holdings list (only those with qty > 0)
   const heldCodes = Object.keys(holds).filter(c => holds[c].qty > 0);
+  const valueOf = code => {
+    const p = state.prices[code] ? state.prices[code].price : holds[code].avgCost;
+    return holds[code].qty * p;
+  };
+  // Compute per-group total value
+  const groupTotals = {};
+  heldCodes.forEach(c => {
+    const g = getStockGroup(c);
+    groupTotals[g] = (groupTotals[g] || 0) + valueOf(c);
+  });
   heldCodes.sort((a, b) => {
-    const pa = state.prices[a] ? state.prices[a].price : holds[a].avgCost;
-    const pb = state.prices[b] ? state.prices[b].price : holds[b].avgCost;
-    return (holds[b].qty * pb) - (holds[a].qty * pa);
+    const ga = getStockGroup(a), gb = getStockGroup(b);
+    if (ga !== gb) return groupTotals[gb] - groupTotals[ga];   // outer: group total desc
+    return valueOf(b) - valueOf(a);                            // inner: individual value desc
   });
 
   // 비중 = 평가금액 / 총자산 (so stocks + cash sum to 100%)
@@ -1925,11 +1951,13 @@ function renderHistory() {
   // Broker tabs (matching overview design)
   const brokerTabs = `
     <div class="broker-tabs">
-      ${BROKERS.map(b => {
+      ${BROKERS.filter(b => b !== 'ISA').map(b => {
         const c = state.transactions.filter(t => t.broker === b).length;
         return `<button class="broker-tab ${state.activeBroker === b ? 'active' : ''}" onclick="setActiveBrokerHistory('${b}')">${b.replace('국내', '')} <span class="text-faint" style="font-weight:400;font-size:10px">${c}</span></button>`;
       }).join('')}
-      <button class="broker-tab ${state.activeBroker === 'total' ? 'active' : ''}" onclick="setActiveBrokerHistory('total')">전체 <span class="text-faint" style="font-weight:400;font-size:10px">${state.transactions.length}</span></button>
+      <button class="broker-tab ${state.activeBroker === 'total' ? 'active' : ''}" onclick="setActiveBrokerHistory('total')">전체 <span class="text-faint" style="font-weight:400;font-size:10px">${state.transactions.filter(t => t.broker !== 'ISA').length}</span></button>
+      <div class="broker-tab-gap"></div>
+      <button class="broker-tab ${state.activeBroker === 'ISA' ? 'active' : ''}" onclick="setActiveBrokerHistory('ISA')">ISA <span class="text-faint" style="font-weight:400;font-size:10px">${state.transactions.filter(t => t.broker === 'ISA').length}</span></button>
     </div>
   `;
 
@@ -1969,12 +1997,15 @@ function setActiveBrokerHistory(broker) {
 function applyHistoryFilter() {
   const codeSel = document.getElementById('filter-code');
   const dirSel = document.getElementById('filter-dir');
-  const broker = state.activeBroker && state.activeBroker !== 'total' ? state.activeBroker : '';
+  const broker = state.activeBroker || 'total';
   const code = codeSel ? codeSel.value : '';
   const dir = dirSel ? dirSel.value : '';
 
   let rows = [...state.transactions].reverse();
-  if (broker) rows = rows.filter(t => t.broker === broker);
+  // 'total' = all except ISA; ISA = only ISA; specific broker = filter by that broker
+  if (broker === 'total') rows = rows.filter(t => t.broker !== 'ISA');
+  else if (broker === 'ISA') rows = rows.filter(t => t.broker === 'ISA');
+  else rows = rows.filter(t => t.broker === broker);
   if (code) rows = rows.filter(t => t.code === code);
   if (dir === 'buy') rows = rows.filter(t => t.qty > 0);
   if (dir === 'sell') rows = rows.filter(t => t.qty < 0);
@@ -2495,8 +2526,13 @@ async function recalcDailyValues() {
   if (!confirm(`daily_value_kr 탭을 전체 재계산합니다.\n시세 API 호출에 ~30초~2분 소요. 계속?`)) return;
 
   try {
+    // 'total' aggregate excludes ISA (shown separately in its own tab) -- so the
+    // sheet's totalValue column reflects 삼성 + 키움 + 메리츠 only. ISA daily values
+    // are recomputed live from yEntry.prices when the user is on the ISA tab.
+    const allTxs = state.transactions.filter(t => t.broker !== 'ISA');
+    if (!allTxs.length) { toast('거래내역 없음 (ISA 제외) — 먼저 새로고침', 'error'); return; }
     // Sort with buys-first within same date (matches computeHoldings ordering)
-    const sorted = [...state.transactions].sort((a, b) => {
+    const sorted = [...allTxs].sort((a, b) => {
       if (a.date !== b.date) return a.date < b.date ? -1 : 1;
       const aIsBuy = a.qty > 0 ? 0 : 1;
       const bIsBuy = b.qty > 0 ? 0 : 1;
@@ -2738,8 +2774,16 @@ async function refreshPrices() {
 async function refreshAll() {
   if (!isConfigured()) { toast('설정에서 JSON과 Sheet ID를 입력하세요', 'error'); switchTab('settings'); return; }
   await refreshTransactions();
+  // Load _cachedDaily BEFORE rendering so daily-change badges have yesterday's
+  // totalValue from the sheet (the source of truth) on the very first render.
+  // Without this, the first render shows "총수익 daily change = full value"
+  // because yesterdayValues.totalGain falls back to 0.
+  if (!_cachedDaily) {
+    try { _cachedDaily = await loadDailyValues(); }
+    catch (e) { console.warn('Initial daily-cache load failed:', e); }
+  }
   await refreshPrices();
-  // Auto-calculate daily values from last stored date to today
+  // Auto-calculate daily values from last stored date to today (may write new rows + re-render)
   await autoCalcDailyValues();
 }
 
@@ -2789,7 +2833,8 @@ async function autoCalcDailyValues() {
 
       let totalValue = 0;
       let totalCash = 0;
-      for (const broker of BROKERS) {
+      // 'total' aggregate excludes ISA (shown separately) - see getTxsForBroker
+      for (const broker of BROKERS.filter(b => b !== 'ISA')) {
         const brokerTxs = txsUpToDate.filter(t => t.broker === broker);
         const initialCash = state.initialCashByBroker[broker] || 0;
         const sum = computeSummary(brokerTxs, holds, state.prices, initialCash);
