@@ -102,17 +102,17 @@
   .day-summary { background: rgba(255,255,255,0.04); }
   .day-summary td { padding: 5px 8px !important; border-top: 1px solid var(--border); }
 
-  /* Holdings header + row: 5 columns × 2 rows */
+  /* Holdings header + row: 6 columns × 2 rows */
   .hold-hdr {
     display: grid;
-    grid-template-columns: 1.6fr 1.1fr 1.1fr 1.1fr 1.2fr;
+    grid-template-columns: 1.6fr 1.1fr 1.1fr 1.1fr 0.7fr 1.2fr;
     gap: 4px; padding: 6px 10px; font-size: 10px; color: var(--text-faint);
     border-bottom: 1px solid var(--border);
     background: var(--bg); position: sticky; top: 0; z-index: 1;
   }
   .holding-row {
     display: grid;
-    grid-template-columns: 1.6fr 1.1fr 1.1fr 1.1fr 1.2fr;
+    grid-template-columns: 1.6fr 1.1fr 1.1fr 1.1fr 0.7fr 1.2fr;
     gap: 4px; padding: 9px 10px; border-bottom: 1px solid var(--border);
     cursor: pointer; transition: background 0.1s; align-items: center;
   }
@@ -127,6 +127,9 @@
   .hold-cell-price .price-avg { font-size: 11px; color: var(--text-dim); white-space: nowrap; margin-top: 2px; }
   .holding-name { font-weight: 600; font-size: 14px; }
   .holding-code { font-size: 11px; color: var(--text-faint); font-family: ui-monospace, monospace; }
+  /* Weight bar (비중 column) */
+  .hold-bar { width: 100%; height: 4px; background: var(--bg); border-radius: 2px; overflow: hidden; margin-top: 3px; }
+  .hold-bar > div { height: 100%; background: var(--accent); border-radius: 2px; }
 
   /* History table */
   .history-table { width: 100%; border-collapse: collapse; font-size: 12px; }
@@ -219,7 +222,7 @@
 
 <div class="header">
   <div style="flex:1;min-width:0">
-    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v1.9</span></div>
+    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v2.0</span></div>
     <div style="font-size:11px;color:var(--text-dim);margin-top:2px;font-family:ui-monospace,monospace">
       <span id="verInfo">html-—</span> · <span id="priceInfo">시세-—</span>
     </div>
@@ -1109,6 +1112,13 @@ function renderOverview() {
     return (holds[b].qty * pb) - (holds[a].qty * pa);
   });
 
+  // Total market value for weight calculation
+  const totalMarketValue = heldCodes.reduce((s, code) => {
+    const h = holds[code];
+    const p = state.prices[code] ? state.prices[code].price : null;
+    return s + (p ? h.qty * p : 0);
+  }, 0);
+
   const holdingsHtml = heldCodes.length === 0
     ? `<div class="empty"><div class="emoji">💼</div><div>현재 보유 종목 없음</div></div>`
     : `<div class="hold-hdr">
@@ -1116,6 +1126,7 @@ function renderOverview() {
           <div>현재가 (d/1w) / 평단</div>
           <div>평가손익 / 수익률</div>
           <div>평가금액 / 매수금액</div>
+          <div>비중</div>
           <div>실현 YTD / total</div>
         </div>` +
       heldCodes.map(code => {
@@ -1127,6 +1138,7 @@ function renderOverview() {
         const value = curPrice ? h.qty * curPrice : null;
         const upl = curPrice ? value - lineCost : null;
         const uplPct = curPrice && h.avgCost > 0 ? (curPrice - h.avgCost) / h.avgCost : null;
+        const weightPct = (value !== null && totalMarketValue > 0) ? value / totalMarketValue : null;
         return `
           <div class="holding-row" onclick="selectTicker('${code}')">
             <div class="hold-cell">
@@ -1144,6 +1156,10 @@ function renderOverview() {
             <div class="hold-cell">
               <div class="top">${value !== null ? fmtMan(value, '') : fmtMan(lineCost, '')}</div>
               <div class="bot">${fmtMan(lineCost, '')}</div>
+            </div>
+            <div class="hold-cell">
+              <div class="top">${weightPct !== null ? (weightPct * 100).toFixed(1) + '%' : '—'}</div>
+              ${weightPct !== null ? `<div class="hold-bar"><div style="width:${Math.min(100, weightPct * 100).toFixed(1)}%"></div></div>` : ''}
             </div>
             <div class="hold-cell">
               <div class="top" style="white-space:nowrap"><span class="${plClass(h.realizedPLThisYear)}">${fmtManSigned(h.realizedPLThisYear, '')}</span> <span class="text-faint">/</span> <span class="${plClass(h.realizedPL)}">${fmtManSigned(h.realizedPL, '')}</span></div>
@@ -1176,7 +1192,7 @@ function renderOverview() {
       </summary>
       <div class="hold-hdr" style="border-top:1px solid var(--border)">
         <div>종목</div>
-        <div style="grid-column:span 3;text-align:left">실현 YTD / total</div>
+        <div style="grid-column:span 4;text-align:left">실현 YTD / total</div>
         <div></div>
       </div>
       ${historicCodes.map(code => {
@@ -1188,7 +1204,7 @@ function renderOverview() {
               <div class="top">${escapeHtml(name)}</div>
               <div class="bot" style="font-family:ui-monospace,monospace">${code}</div>
             </div>
-            <div class="hold-cell" style="grid-column:span 3">
+            <div class="hold-cell" style="grid-column:span 4">
               <div class="top" style="white-space:nowrap">
                 <span class="${plClass(h.realizedPLThisYear)}">${fmtManSigned(h.realizedPLThisYear, '')}</span>
                 <span class="text-faint">/</span>
