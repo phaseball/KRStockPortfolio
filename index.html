@@ -222,7 +222,7 @@
 
 <div class="header">
   <div style="flex:1;min-width:0">
-    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v2.0</span></div>
+    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v2.1</span></div>
     <div style="font-size:11px;color:var(--text-dim);margin-top:2px;font-family:ui-monospace,monospace">
       <span id="verInfo">html-—</span> · <span id="priceInfo">시세-—</span>
     </div>
@@ -252,7 +252,7 @@
 <script>
 // ============ CONFIG ============
 const STORAGE_KEY = 'kr_tracker_v1';
-const BROKERS = ['삼성국내', '키움국내', 'ISA', '메리츠국내'];
+const BROKERS = ['삼성국내', '키움국내', '메리츠국내', 'ISA'];
 const TX_TAB = BROKERS[0];   // default/legacy
 const NAMES_TAB = 'kr_names';
 const CONFIG_TAB = 'config_kr';
@@ -1112,12 +1112,8 @@ function renderOverview() {
     return (holds[b].qty * pb) - (holds[a].qty * pa);
   });
 
-  // Total market value for weight calculation
-  const totalMarketValue = heldCodes.reduce((s, code) => {
-    const h = holds[code];
-    const p = state.prices[code] ? state.prices[code].price : null;
-    return s + (p ? h.qty * p : 0);
-  }, 0);
+  // 비중 = 평가금액 / 총자산 (so stocks + cash sum to 100%)
+  const totalAsset = sum.totalAsset;
 
   const holdingsHtml = heldCodes.length === 0
     ? `<div class="empty"><div class="emoji">💼</div><div>현재 보유 종목 없음</div></div>`
@@ -1138,7 +1134,7 @@ function renderOverview() {
         const value = curPrice ? h.qty * curPrice : null;
         const upl = curPrice ? value - lineCost : null;
         const uplPct = curPrice && h.avgCost > 0 ? (curPrice - h.avgCost) / h.avgCost : null;
-        const weightPct = (value !== null && totalMarketValue > 0) ? value / totalMarketValue : null;
+        const weightPct = (value !== null && totalAsset > 0) ? value / totalAsset : null;
         return `
           <div class="holding-row" onclick="selectTicker('${code}')">
             <div class="hold-cell">
