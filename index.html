@@ -223,7 +223,7 @@
 
 <div class="header">
   <div style="flex:1;min-width:0">
-    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v2.7</span></div>
+    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v2.8</span></div>
     <div style="font-size:11px;color:var(--text-dim);margin-top:2px;font-family:ui-monospace,monospace">
       <span id="verInfo">html-—</span> · <span id="priceInfo">시세-—</span>
     </div>
@@ -303,6 +303,7 @@ let state = {
   selectedCode: null,
   showTotalChart: false,
   chartPeriod: '2026',  // 'total' | '1y' | '6m' | '3m' | '2025' | '2026'
+  tickerChartPeriod: '2026',  // same options, separate selection for ticker detail chart
   chartScale: 'log',     // 'log' | 'linear'
   chartBenches: { '^KS11': true, '091160.KS': true, '^KQ11': true },  // KOSPI / KODEX반도체 / KOSDAQ
   currentTab: 'overview',
@@ -1845,14 +1846,35 @@ function computeTickerTimeSeries(code) {
 }
 
 let _tickerChartInstance = null;
+function setTickerChartPeriod(p) {
+  state.tickerChartPeriod = p;
+  saveLocal();
+  if (state.selectedCode) {
+    drawTickerChart(state.selectedCode);
+    // Re-render the period buttons so the active state updates
+    const host = document.getElementById('ticker-period-host');
+    if (host) host.innerHTML = renderTickerPeriodButtons();
+  }
+}
+
+function renderTickerPeriodButtons() {
+  const periods = ['total', '1y', '6m', '3m', '2025', '2026'];
+  return `
+    <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">
+      <span class="lbl" style="font-size:11px;color:var(--text-faint);margin-right:4px">기간</span>
+      ${periods.map(p => `<button class="cbtn ${state.tickerChartPeriod===p?'on':''}" onclick="setTickerChartPeriod('${p}')">${p === 'total' ? 'TOTAL' : p.toUpperCase()}</button>`).join('')}
+    </div>
+  `;
+}
+
 function drawTickerChart(code) {
   const canvas = document.getElementById('tickerChartCanvas');
   if (!canvas) return;
   if (_tickerChartInstance) { _tickerChartInstance.destroy(); _tickerChartInstance = null; }
 
-  const series = computeTickerTimeSeries(code);
+  const fullSeries = computeTickerTimeSeries(code);
   const placeholder = document.getElementById('tickerChartPlaceholder');
-  if (!series || !series.dates.length) {
+  if (!fullSeries || !fullSeries.dates.length) {
     if (placeholder) placeholder.textContent = _cachedDaily ? '데이터 없음' : 'daily_value_kr 로딩 중...';
     // If daily cache isn't loaded yet, trigger load + retry
     if (!_cachedDaily && !_dailyLoadingPromise && isConfigured()) {
@@ -1865,6 +1887,46 @@ function drawTickerChart(code) {
     return;
   }
   if (placeholder) placeholder.style.display = 'none';
+
+  // Apply period filter (same options/logic as total value chart's filterByPeriod)
+  const period = state.tickerChartPeriod || '2026';
+  let keepIdx;
+  if (period === 'total') {
+    keepIdx = fullSeries.dates.map((_, i) => i);
+  } else if (period.match(/^\d{4}$/)) {
+    const start = `${period}-01-01`, end = `${period}-12-31`;
+    keepIdx = fullSeries.dates
+      .map((d, i) => [d, i])
+      .filter(([d]) => d >= start && d <= end)
+      .map(([, i]) => i);
+  } else {
+    // 1y / 6m / 3m: KST-anchored cutoff using UTC arithmetic
+    const todayKST = getKoreanToday();
+    const [yy, mm0, dd0] = todayKST.split('-').map(Number);
+    const cutD = new Date(Date.UTC(yy, mm0 - 1, dd0));
+    if (period === '1y') cutD.setUTCFullYear(cutD.getUTCFullYear() - 1);
+    else if (period === '6m') cutD.setUTCMonth(cutD.getUTCMonth() - 6);
+    else if (period === '3m') cutD.setUTCMonth(cutD.getUTCMonth() - 3);
+    const cutoff = cutD.toISOString().slice(0, 10);
+    keepIdx = fullSeries.dates
+      .map((d, i) => [d, i])
+      .filter(([d]) => d >= cutoff)
+      .map(([, i]) => i);
+  }
+  if (!keepIdx.length) {
+    if (placeholder) { placeholder.style.display = 'flex'; placeholder.textContent = '선택한 기간에 데이터 없음'; }
+    return;
+  }
+  const pick = (arr) => keepIdx.map(i => arr[i]);
+  const series = {
+    dates: pick(fullSeries.dates),
+    cost: pick(fullSeries.cost),
+    marketValue: pick(fullSeries.marketValue),
+    unrealizedPL: pick(fullSeries.unrealizedPL),
+    realizedPL: pick(fullSeries.realizedPL),
+    totalPL: pick(fullSeries.totalPL),
+    price: pick(fullSeries.price),
+  };
 
   const ctx = canvas.getContext('2d');
   // Y-axis tick formatter: 만 unit
@@ -1921,20 +1983,51 @@ function renderTickerDetail(code) {
   const name = state.names[code] || code;
   const txs = state.transactions.filter(t => t.code === code);
   const holds = computeHoldings(state.transactions);
-  const h = holds[code] || { qty: 0, avgCost: 0, realizedPL: 0 };
+  const h = holds[code] || { qty: 0, avgCost: 0, realizedPL: 0, realizedPLThisYear: 0 };
   const priceObj = state.prices[code];
   const curPrice = priceObj ? priceObj.price : null;
   const lineCost = h.qty * h.avgCost;
   const value = curPrice && h.qty > 0 ? h.qty * curPrice : null;
   const upl = value !== null ? value - lineCost : null;
   const uplPct = curPrice && h.avgCost > 0 ? (curPrice - h.avgCost) / h.avgCost : null;
+  const totalGain = (upl || 0) + (h.realizedPL || 0);
+
+  // %1d / %1w from priceObj (uses prevClose & week1Close in state.prices)
+  const d1 = priceObj && priceObj.changeRate != null ? priceObj.changeRate : null;
+  const w1 = priceObj && priceObj.week1Rate != null ? priceObj.week1Rate : null;
+  const priceChangesSub = (d1 != null || w1 != null)
+    ? `(${d1 != null ? `<span class="${plClass(d1)}">${fmtPct(d1)}</span>` : '—'}${w1 != null ? ` / <span class="${plClass(w1)}">${fmtPct(w1)}</span>` : ''})`
+    : '';
 
   const summary = `
     <div class="cards-grid">
-      <div class="card summary-card"><div class="label">보유수량</div><div class="value">${h.qty.toString()}주</div><div class="sub">평단 ${fmtMan2(h.avgCost)}</div></div>
-      <div class="card summary-card"><div class="label">현재가</div><div class="value">${curPrice ? fmtMan2(curPrice) : '—'}</div><div class="sub">${fmtChangePcts(priceObj).trim() || ''}</div></div>
-      <div class="card summary-card"><div class="label">평가손익</div><div class="value ${plClass(upl)}">${fmtManSigned(upl, '')}</div><div class="sub ${plClass(uplPct)}">${fmtPct(uplPct)}</div></div>
-      <div class="card summary-card"><div class="label">실현손익</div><div class="value ${plClass(h.realizedPL)}">${fmtManSigned(h.realizedPL, '')}</div></div>
+      <div class="card summary-card">
+        <div class="label">보유수량</div>
+        <div class="value">${h.qty.toString()}주</div>
+        <div class="sub">평단 ${fmtMan2(h.avgCost)}</div>
+      </div>
+      <div class="card summary-card">
+        <div class="label">평가 / 매수</div>
+        <div class="value">${value !== null ? fmtMan(value, '') : '—'}</div>
+        <div class="sub">
+          매수 ${fmtMan(lineCost, '')}<br>
+          <span class="${plClass(upl)}">평가손익 ${upl !== null ? fmtManSigned(upl, '') : '—'}${uplPct !== null ? ` (${fmtPct(uplPct)})` : ''}</span>
+        </div>
+      </div>
+      <div class="card summary-card">
+        <div class="label">실현 YTD/total · 총수익</div>
+        <div class="value ${plClass(totalGain)}">${fmtManSigned(totalGain, '')}</div>
+        <div class="sub">
+          <span class="${plClass(h.realizedPLThisYear)}">YTD ${fmtManSigned(h.realizedPLThisYear, '')}</span>
+          <span class="text-faint"> / </span>
+          <span class="${plClass(h.realizedPL)}">total ${fmtManSigned(h.realizedPL, '')}</span>
+        </div>
+      </div>
+      <div class="card summary-card">
+        <div class="label">현재가</div>
+        <div class="value">${curPrice ? fmtMan2(curPrice) : '—'}</div>
+        <div class="sub">${priceChangesSub || '<span class="text-faint">—</span>'}</div>
+      </div>
     </div>
   `;
 
@@ -1993,7 +2086,10 @@ function renderTickerDetail(code) {
     <div style="font-size:12px;color:var(--text-faint);font-family:ui-monospace,monospace;margin-bottom:16px">${code}</div>
     ${summary}
     <div class="card" style="padding:12px;margin-bottom:12px;position:relative">
-      <h2 style="margin:0 0 8px 0;font-size:15px">📊 종목 히스토리</h2>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+        <h2 style="margin:0;font-size:15px">📊 종목 히스토리</h2>
+        <div id="ticker-period-host">${renderTickerPeriodButtons()}</div>
+      </div>
       <div style="height:340px;position:relative">
         <canvas id="tickerChartCanvas"></canvas>
         <div id="tickerChartPlaceholder" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--text-faint);font-size:12px;pointer-events:none"></div>
