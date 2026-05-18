@@ -222,7 +222,7 @@
 
 <div class="header">
   <div style="flex:1;min-width:0">
-    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v2.1</span></div>
+    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v2.2</span></div>
     <div style="font-size:11px;color:var(--text-dim);margin-top:2px;font-family:ui-monospace,monospace">
       <span id="verInfo">html-—</span> · <span id="priceInfo">시세-—</span>
     </div>
@@ -379,6 +379,21 @@ function getKoreanToday() {
   return getKoreanDate();
 }
 
+// Format any Date or timestamp as "MMDD-HH:MM:SS" in KST.
+// Independent of the user's local timezone — always shows Korean time.
+function fmtKstTime(input) {
+  const d = (input instanceof Date) ? input : new Date(input);
+  if (isNaN(d.getTime())) return '—';
+  // Shift to KST: UTC + 9h
+  const kst = new Date(d.getTime() + 9 * 3600000);
+  const mm = String(kst.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(kst.getUTCDate()).padStart(2, '0');
+  const hh = String(kst.getUTCHours()).padStart(2, '0');
+  const mi = String(kst.getUTCMinutes()).padStart(2, '0');
+  const ss = String(kst.getUTCSeconds()).padStart(2, '0');
+  return `${mm}${dd}-${hh}:${mi}:${ss}`;
+}
+
 // All numeric output: 만(萬, 10,000) unit, NO thousand-separator commas.
 // 1 decimal everywhere unless value < 1만 (then 2 decimals for precision).
 // Pass suffix='' to omit '만' (used in ticker cards/rows).
@@ -525,14 +540,7 @@ function getBuildTime() {
   const lm = document.lastModified;
   if (lm) {
     const d = new Date(lm);
-    if (!isNaN(d.getTime())) {
-      const mm = String(d.getMonth() + 1).padStart(2, '0');
-      const dd = String(d.getDate()).padStart(2, '0');
-      const hh = String(d.getHours()).padStart(2, '0');
-      const mi = String(d.getMinutes()).padStart(2, '0');
-      const ss = String(d.getSeconds()).padStart(2, '0');
-      return `${mm}${dd}-${hh}:${mi}:${ss}`;
-    }
+    if (!isNaN(d.getTime())) return fmtKstTime(d);
   }
   return '—';
 }
@@ -543,13 +551,7 @@ function updateHeaderInfo() {
   const pf = document.getElementById('priceInfo');
   if (pf) {
     if (state.lastPriceFetchAt) {
-      const d = new Date(state.lastPriceFetchAt);
-      const mm = String(d.getMonth() + 1).padStart(2, '0');
-      const dd = String(d.getDate()).padStart(2, '0');
-      const hh = String(d.getHours()).padStart(2, '0');
-      const mi = String(d.getMinutes()).padStart(2, '0');
-      const ss = String(d.getSeconds()).padStart(2, '0');
-      pf.textContent = `시세-${mm}${dd}-${hh}:${mi}:${ss}`;
+      pf.textContent = `시세-${fmtKstTime(state.lastPriceFetchAt)}`;
     } else {
       pf.textContent = '시세-—';
     }
@@ -902,8 +904,9 @@ async function fetchAllHistorical(codes, fromDate, toDate, onProgress) {
 //   avgCost is preserved across partial sells; clamps to 0 when qty<=0
 function computeHoldings(txs) {
   const holds = {};
-  const curYear = new Date().getFullYear().toString();
-  const today = todayKR();
+  const todayKST = getKoreanToday();           // KST "YYYY-MM-DD"
+  const curYear = todayKST.slice(0, 4);
+  const today = todayKST;
   for (const tx of txs) {
     if (!tx.code) continue;
     if (!holds[tx.code]) holds[tx.code] = {
@@ -1223,13 +1226,7 @@ function renderOverview() {
 
 function pricesAsOfStr() {
   if (!state.lastPriceFetchAt) return '시세기준-—';
-  const d = new Date(state.lastPriceFetchAt);
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mi = String(d.getMinutes()).padStart(2, '0');
-  const ss = String(d.getSeconds()).padStart(2, '0');
-  return `시세기준-${mm}${dd}-${hh}:${mi}:${ss}`;
+  return `시세기준-${fmtKstTime(state.lastPriceFetchAt)}`;
 }
 
 function selectTicker(code) { state.selectedCode = code; renderOverview(); }
@@ -1382,15 +1379,15 @@ function filterByPeriod(daily, period) {
   if (period === 'total') return daily.slice();
   if (period === '2025') return daily.filter(d => d.date >= '2025-01-01' && d.date <= '2025-12-31');
   if (period === '2026') return daily.filter(d => d.date >= '2026-01-01' && d.date <= '2026-12-31');
-  const now = new Date();
-  let cutD;
-  if (period === '1y') cutD = new Date(now.getFullYear()-1, now.getMonth(), now.getDate());
-  else if (period === '6m') cutD = new Date(now.getFullYear(), now.getMonth()-6, now.getDate());
-  else if (period === '3m') cutD = new Date(now.getFullYear(), now.getMonth()-3, now.getDate());
+  // KST-based cutoff: parse today's KST date and step back N months/years using UTC arithmetic
+  const todayKST = getKoreanToday();
+  const [yy, mm0, dd0] = todayKST.split('-').map(Number);
+  const cutD = new Date(Date.UTC(yy, mm0 - 1, dd0));
+  if (period === '1y') cutD.setUTCFullYear(cutD.getUTCFullYear() - 1);
+  else if (period === '6m') cutD.setUTCMonth(cutD.getUTCMonth() - 6);
+  else if (period === '3m') cutD.setUTCMonth(cutD.getUTCMonth() - 3);
   else return daily.slice();
-  const mm = String(cutD.getMonth() + 1).padStart(2, '0');
-  const dd = String(cutD.getDate()).padStart(2, '0');
-  const cutoff = `${cutD.getFullYear()}-${mm}-${dd}`;
+  const cutoff = cutD.toISOString().slice(0, 10);
   return daily.filter(d => d.date >= cutoff);
 }
 
@@ -2746,64 +2743,89 @@ async function refreshAll() {
   await autoCalcDailyValues();
 }
 
+// Add 1 day to a "YYYY-MM-DD" string (timezone-safe — no Date object math)
+function addOneDay(yyyymmdd) {
+  // Parse as UTC midnight to avoid local-timezone shifts, then advance 1 day in UTC
+  const d = new Date(yyyymmdd + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
 async function autoCalcDailyValues() {
   try {
-    // Get last date from daily_value sheet
-    const rows = await sheetGet(`${DAILY_TAB}!A:B`);
+    // Read all 5 columns so we can detect/replace today's row if it already exists
+    const rows = await sheetGet(`${DAILY_TAB}!A:E`);
     if (!rows || rows.length < 2) return; // No data yet, skip
-    
-    const lastRow = rows[rows.length - 1];
-    if (!lastRow[0]) return;
-    
-    const lastDate = parseDate(lastRow[0]);
-    const todayKST = getKoreanToday();
-    const today = parseDate(todayKST);
-    
-    // If lastDate is today or later, nothing to do
-    if (lastDate >= today) return;
-    
-    // Calculate missing days: lastDate+1 to today
-    const missingDays = [];
-    const d = new Date(lastDate);
-    d.setDate(d.getDate() + 1);
-    while (d <= today) {
-      missingDays.push(new Date(d));
-      d.setDate(d.getDate() + 1);
+
+    // Find latest existing date (skip blank trailing rows)
+    let lastDataIdx = -1;
+    for (let i = rows.length - 1; i >= 1; i--) {
+      if (rows[i] && rows[i][0]) { lastDataIdx = i; break; }
     }
-    
+    if (lastDataIdx === -1) return;
+
+    const lastDate = parseDate(rows[lastDataIdx][0]); // STRING "YYYY-MM-DD"
+    const todayKST = getKoreanToday();                 // STRING "YYYY-MM-DD"
+
+    if (lastDate >= todayKST) return; // already up to date
+
+    // Build list of missing day strings (lastDate+1 ... todayKST) — string compare, no Date object pitfalls
+    const missingDays = [];
+    let cursor = addOneDay(lastDate);
+    while (cursor <= todayKST) {
+      missingDays.push(cursor);
+      cursor = addOneDay(cursor);
+    }
     if (missingDays.length === 0) return;
-    
-    // Calculate daily values for missing days (use Korean dates)
+
+    // For each missing day, compute totalValue/cash plus full holdings & prices snapshot.
+    // Note: we use current state.prices as a proxy for past days we don't have history for.
+    // This is acceptable for filling 1-2 day gaps (today + maybe yesterday) — for longer
+    // gaps the user should run the manual 🔄 재계산 which uses each day's stored data.
     const newRows = [];
-    for (const day of missingDays) {
-      const dateStr = getKoreanDate(day);
-      const txsUpToDate = state.transactions.filter(t => parseDate(t.date) <= day);
+    for (const dateStr of missingDays) {
+      const txsUpToDate = state.transactions.filter(t => t.date <= dateStr);
       const holds = computeHoldings(txsUpToDate);
+
       let totalValue = 0;
+      let totalCash = 0;
       for (const broker of BROKERS) {
         const brokerTxs = txsUpToDate.filter(t => t.broker === broker);
         const initialCash = state.initialCashByBroker[broker] || 0;
         const sum = computeSummary(brokerTxs, holds, state.prices, initialCash);
         totalValue += sum.totalAsset;
+        totalCash  += sum.cash;
       }
-      newRows.push([dateStr, totalValue]);
+
+      // Snapshot per-code holdings (market value) and prices (close-like price) for charts
+      const holdingsMap = {};
+      const pricesMap = {};
+      for (const code in holds) {
+        if (holds[code].qty <= 0) continue;
+        const p = state.prices[code] ? state.prices[code].price : null;
+        if (p == null) continue;
+        holdingsMap[code] = holds[code].qty * p;
+        pricesMap[code] = p;
+      }
+
+      newRows.push([dateStr, totalValue, totalCash, JSON.stringify(holdingsMap), JSON.stringify(pricesMap)]);
     }
-    
-    // Append to sheet
-    if (newRows.length > 0) {
-      const token = await getAccessToken();
-      const range = `${DAILY_TAB}!A${rows.length + 1}`;
-      await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${state.sheetId}/values/${range}?valueInputOption=USER_ENTERED`, {
-        method: 'PUT',
-        headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ values: newRows }),
-      });
-      _cachedDaily = null; // Invalidate cache
-      console.log(`Auto-calculated ${newRows.length} daily values`);
-    }
+
+    // Write rows. Append after lastDataIdx (1-indexed in Sheets ⇒ row number = lastDataIdx + 1).
+    const token = await getAccessToken();
+    const startRow = lastDataIdx + 2; // first empty data row
+    const range = `${DAILY_TAB}!A${startRow}:E${startRow + newRows.length - 1}`;
+    await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${state.sheetId}/values/${range}?valueInputOption=USER_ENTERED`, {
+      method: 'PUT',
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ values: newRows }),
+    });
+
+    _cachedDaily = null;                      // force chart to reload fresh data
+    console.log(`Auto-calculated ${newRows.length} daily values (KST): ${missingDays.join(', ')}`);
   } catch (e) {
     console.warn('Auto-calc daily values failed:', e);
-    // Don't show error toast - this is background operation
+    // Don't show error toast - this is a background operation
   }
 }
 
