@@ -223,7 +223,7 @@
 
 <div class="header">
   <div style="flex:1;min-width:0">
-    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v2.6</span></div>
+    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v2.7</span></div>
     <div style="font-size:11px;color:var(--text-dim);margin-top:2px;font-family:ui-monospace,monospace">
       <span id="verInfo">html-—</span> · <span id="priceInfo">시세-—</span>
     </div>
@@ -1412,6 +1412,20 @@ function computePerBrokerYesterdayValue(broker, yEntry, asOfDate) {
   return cash + marketValue;
 }
 
+// Compute "non-ISA total value" for a daily cache entry. Falls back to entry.totalValue when
+// prices snapshot is missing (old rows) — slightly inaccurate by ISA's contribution but
+// keeps the chart usable even before a fresh 재계산.
+function getDayNonISATotal(dailyEntry) {
+  if (!dailyEntry) return null;
+  if (!dailyEntry.prices) return dailyEntry.totalValue;
+  let total = 0;
+  for (const b of BROKERS.filter(x => x !== 'ISA')) {
+    const v = computePerBrokerYesterdayValue(b, dailyEntry, dailyEntry.date);
+    if (v != null) total += v;
+  }
+  return total;
+}
+
 // Fetch full historical daily closes for a Yahoo symbol (indices supported with ^ prefix).
 async function fetchYahooHist(symbol, range = '5y') {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=${range}`;
@@ -1485,22 +1499,28 @@ async function drawTotalChart() {
     return;
   }
 
-  // Normalize: base = previous day's end value (or first value if no previous day)
+  // Pre-compute non-ISA total for every entry in series (so we don't repeat work in tooltip / summary)
+  const seriesNonISA = series.map(d => getDayNonISATotal(d) || 0);
+
+  // Normalize: base = previous TRADING day's non-ISA close (or first value if no previous day).
+  // We look back through _cachedDaily (which only has trading days) to find the entry
+  // immediately before series[0]. This makes period-to-period transitions seamless
+  // (end of 2025 == start of 2026).
   const labels = series.map(d => d.date);
-  let baseValue = series[0].totalValue || 1;
-  // For period charts (not 'total'), use the last value from the day before the period start
+  let baseValue = seriesNonISA[0] || 1;
   if (state.chartPeriod !== 'total') {
     const firstDate = series[0].date;
-    const firstDateObj = new Date(firstDate + 'T00:00:00');
-    const prevDateObj = new Date(firstDateObj);
-    prevDateObj.setDate(prevDateObj.getDate() - 1);
-    const prevDate = prevDateObj.toISOString().split('T')[0];
-    const prevDay = _cachedDaily.find(d => d.date === prevDate);
-    if (prevDay && prevDay.totalValue) {
-      baseValue = prevDay.totalValue;
+    // Find the last _cachedDaily entry strictly before firstDate
+    let prevEntry = null;
+    for (const d of _cachedDaily) {
+      if (d.date < firstDate && (!prevEntry || d.date > prevEntry.date)) prevEntry = d;
+    }
+    if (prevEntry) {
+      const prevVal = getDayNonISATotal(prevEntry);
+      if (prevVal) baseValue = prevVal;
     }
   }
-  const portfolioData = series.map(d => d.totalValue / baseValue * 100);
+  const portfolioData = seriesNonISA.map(v => v / baseValue * 100);
 
   const benchDatasets = [];
   for (const b of enabledBenches) {
@@ -1602,10 +1622,12 @@ async function drawTotalChart() {
               const v = tctx.parsed.y;
               if (v == null) return '';
               const idx = tctx.dataIndex;
-              // Portfolio: just "105.3 (+₩50.2만)" without label
+              // Portfolio: just "105.3 (+₩50.2만)" without label - uses non-ISA total
               if (tctx.dataset.label === '내 포트폴리오' && series[idx]) {
-                const totalValue = series[idx].totalValue;
-                const initialCash = getInitialCashForBroker(state.activeBroker);
+                const totalValue = seriesNonISA[idx];
+                // initialCash for 'total' already excludes ISA; this gives us the
+                // "전체 (ISA 제외)" totalGain that matches the cards on 개요.
+                const initialCash = getInitialCashForBroker('total');
                 const totalGain = totalValue - initialCash;
                 return `${v.toFixed(1)} (${fmtManSigned(totalGain)})`;
               }
@@ -1725,30 +1747,49 @@ function renderChartSummary(periodSeries) {
     el.innerHTML = '<div class="card" style="margin-top:8px;padding:12px;color:var(--text-faint)">데이터 없음</div>';
     return;
   }
-  
-  // Build compact summary like v4: "PERIOD (Nd): start → end, +X.X% (+₩change)"
-  const buildLine = (label, daily) => {
-    if (!daily || !daily.length) return `<div style="color:var(--text-faint);font-size:13px">${label}: 데이터 없음</div>`;
-    const start = daily[0].totalValue;
-    const end = daily[daily.length-1].totalValue;
-    const diff = end - start;
-    const pct = start > 0 ? (end - start) / start : null;
+
+  // Find the entry strictly before a given date (uses _cachedDaily — only trading days).
+  // Returns null if no earlier entry exists.
+  const lastBefore = (dateStr) => {
+    let best = null;
+    for (const d of _cachedDaily) {
+      if (d.date < dateStr && (!best || d.date > best.date)) best = d;
+    }
+    return best;
+  };
+
+  // Build a line where startValue = previous-trading-day's close (so end of 2025 == start of 2026),
+  // endValue = last-trading-day close within the period. Both use non-ISA totals.
+  const buildLine = (label, rows) => {
+    if (!rows || !rows.length) return `<div style="color:var(--text-faint);font-size:13px">${label}: 데이터 없음</div>`;
+    const firstRow = rows[0];
+    const prevTrading = lastBefore(firstRow.date);
+    const startValue = (prevTrading ? getDayNonISATotal(prevTrading) : getDayNonISATotal(firstRow)) || 0;
+    const endValue = getDayNonISATotal(rows[rows.length - 1]) || 0;
+    const diff = endValue - startValue;
+    const pct = startValue > 0 ? diff / startValue : null;
     const cls = plClass(diff);
-    const days = daily.length;
+    const days = rows.length;
     return `<div style="margin-bottom:4px;font-size:13px">
       <b>${label}</b> <span class="text-faint" style="font-size:11px">(${days}d)</span>: 
-      ₩${fmtMan(start)} → ₩${fmtMan(end)}, 
+      ₩${fmtMan(startValue)} → ₩${fmtMan(endValue)}, 
       <span class="${cls}">${fmtPct(pct)}</span>
       <span class="${cls}" style="font-size:12px">(${fmtManSigned(diff)})</span>
     </div>`;
   };
-  
+
+  // Auto-detect available years in data, then sort DESCENDING (newest first)
+  const yearsInData = new Set();
+  for (const d of _cachedDaily) {
+    if (d.date && d.date.length >= 4) yearsInData.add(d.date.slice(0, 4));
+  }
+  const sortedYears = [...yearsInData].sort().reverse();
   const yearSeries = (y) => _cachedDaily.filter(d => d.date >= `${y}-01-01` && d.date <= `${y}-12-31`);
+
   el.innerHTML = `
     <div class="card" style="margin-top:8px;padding:12px 14px;font-size:13px;line-height:1.7">
       ${buildLine(state.chartPeriod.toUpperCase(), periodSeries)}
-      ${buildLine('2025', yearSeries('2025'))}
-      ${buildLine('2026', yearSeries('2026'))}
+      ${sortedYears.map(y => buildLine(y, yearSeries(y))).join('')}
     </div>
   `;
 }
