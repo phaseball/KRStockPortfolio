@@ -222,7 +222,7 @@
 
 <div class="header">
   <div style="flex:1;min-width:0">
-    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v2.2</span></div>
+    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v2.3</span></div>
     <div style="font-size:11px;color:var(--text-dim);margin-top:2px;font-family:ui-monospace,monospace">
       <span id="verInfo">html-—</span> · <span id="priceInfo">시세-—</span>
     </div>
@@ -2823,6 +2823,22 @@ async function autoCalcDailyValues() {
 
     _cachedDaily = null;                      // force chart to reload fresh data
     console.log(`Auto-calculated ${newRows.length} daily values (KST): ${missingDays.join(', ')}`);
+
+    // Re-fetch fresh cache and re-render overview so daily-change badges reflect the new data.
+    // Without this, the overview keeps showing the stale numbers it rendered before autoCalc ran
+    // (e.g., "총수익 daily change = full value" when yesterday's row was missing).
+    try {
+      const fresh = await loadDailyValues();
+      _cachedDaily = fresh;
+      _dailyLoadingPromise = null;
+      if (state.currentTab === 'overview' && !state.selectedCode && !state.showTotalChart) {
+        renderOverview();
+      } else if (state.currentTab === 'overview' && state.showTotalChart) {
+        if (typeof drawTotalChart === 'function') drawTotalChart();
+      }
+    } catch (e) {
+      console.warn('Post-autoCalc reload failed:', e);
+    }
   } catch (e) {
     console.warn('Auto-calc daily values failed:', e);
     // Don't show error toast - this is a background operation
