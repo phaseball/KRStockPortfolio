@@ -223,7 +223,7 @@
 
 <div class="header">
   <div style="flex:1;min-width:0">
-    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v2.5</span></div>
+    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v2.6</span></div>
     <div style="font-size:11px;color:var(--text-dim);margin-top:2px;font-family:ui-monospace,monospace">
       <span id="verInfo">html-—</span> · <span id="priceInfo">시세-—</span>
     </div>
@@ -310,8 +310,8 @@ let state = {
 
 // Comparison index/ETF tickers for total value chart (Yahoo symbols)
 const BENCH_TICKERS = [
-  { code: '^KS11',     name: 'KOSPI',       color: '#9ca3af' },  // gray
   { code: '091160.KS', name: 'KODEX반도체',  color: '#66bb6a' },  // light green (v4 SOXX)
+  { code: '^KS11',     name: 'KOSPI',       color: '#9ca3af' },  // gray
   { code: '^KQ11',     name: 'KOSDAQ',      color: '#f59e0b' },  // orange
 ];
 
@@ -1345,32 +1345,57 @@ async function loadDailyValues() {
 
 // Compute yesterday's totalAsset for a specific broker (or 'total') using cached daily prices.
 // Returns null if yesterday's entry isn't available in cache.
-function computeYesterdayBrokerValue(broker, yesterdayKST) {
+// Find the most recent _cachedDaily entry whose date < givenDate (handles weekends/holidays).
+// Returns null if cache empty or no entry strictly before givenDate.
+function findLastEntryBefore(givenDate) {
   if (!_cachedDaily || !_cachedDaily.length) return null;
-  const yEntry = _cachedDaily.find(d => d.date === yesterdayKST);
-  if (!yEntry) return null;
-  // 'total' view = full stored totalValue MINUS ISA's yesterday value.
-  // We subtract at display time so the sheet stays format-stable (sum of all brokers).
-  if (broker === 'total') {
-    const full = yEntry.totalValue;
-    if (full == null) return null;
-    // Try to subtract ISA. If we can't (e.g., prices column missing for old rows), fall back
-    // to the full total - good enough to avoid the "full value" daily-change bug, even if the
-    // change is slightly off by ISA's daily movement.
-    if (yEntry.prices) {
-      const isaVal = computePerBrokerYesterdayValue('ISA', yEntry, yesterdayKST);
-      if (isaVal != null) return full - isaVal;
+  let best = null;
+  for (const entry of _cachedDaily) {
+    if (entry.date < givenDate) {
+      if (!best || entry.date > best.date) best = entry;
     }
-    return full;
   }
-  // Per-broker (including ISA): compute from positions + yesterday's prices in the sheet.
-  return computePerBrokerYesterdayValue(broker, yEntry, yesterdayKST);
+  return best;
 }
 
-// Compute end-of-yesterday totalAsset for a specific broker using yEntry's prices snapshot.
-function computePerBrokerYesterdayValue(broker, yEntry, yesterdayKST) {
+function computeYesterdayBrokerValue(broker, yesterdayKST) {
+  // Use the most recent entry strictly before TODAY (today = yesterdayKST + 1 day).
+  // This handles non-trading days (weekends, holidays) where the date "yesterday"
+  // might not have a row but Friday's row exists.
+  const todayKST = addOneDay(yesterdayKST);
+  const yEntry = findLastEntryBefore(todayKST);
+  if (!yEntry) return null;
+
+  // Use yEntry.prices for ALL views (even 'total') — this is the single source of truth
+  // and works regardless of whether yEntry.totalValue was written with or without ISA.
+  if (!yEntry.prices) {
+    // Fallback for old rows that lack the prices column: use totalValue with ISA caveat.
+    // This is intentionally NOT a hard failure — at least the user sees SOMETHING reasonable
+    // before they run 🔄 재계산.
+    if (broker === 'total' && typeof yEntry.totalValue === 'number') {
+      return yEntry.totalValue; // includes ISA — slight inaccuracy but no "full value" bug
+    }
+    return null;
+  }
+
+  if (broker === 'total') {
+    // 'total' = sum of all non-ISA brokers
+    let total = 0;
+    for (const b of BROKERS.filter(x => x !== 'ISA')) {
+      const v = computePerBrokerYesterdayValue(b, yEntry, yEntry.date);
+      if (v != null) total += v;
+    }
+    return total;
+  }
+
+  return computePerBrokerYesterdayValue(broker, yEntry, yEntry.date);
+}
+
+// Compute end-of-day totalAsset for a specific broker using yEntry's prices snapshot.
+// `asOfDate` is the cache entry's date (i.e., "as of end of that day"); we filter txs <= that.
+function computePerBrokerYesterdayValue(broker, yEntry, asOfDate) {
   if (!yEntry || !yEntry.prices) return null;
-  const brokerTxs = state.transactions.filter(t => t.broker === broker && t.date <= yesterdayKST);
+  const brokerTxs = state.transactions.filter(t => t.broker === broker && t.date <= asOfDate);
   const positions = {};
   let cash = state.initialCashByBroker[broker] || 0;
   for (const tx of brokerTxs) {
@@ -2594,9 +2619,9 @@ async function recalcDailyValues() {
 
     // Determine effective initial cash: max(user setting, minimum required for trades).
     // The "minimum required" = -min(cumulative_cash_flow) so cash never dips below 0.
-    // This corrects the case where the user hasn't set initial_cash, which would
-    // produce negative totalValues during peak-buying periods.
-    const userInitial = getInitialCashForBroker('total');
+    // Use ALL brokers' initial cash (including ISA) so the stored totalValue is
+    // consistent with cumulative cash flow from ALL transactions.
+    const userInitial = BROKERS.reduce((s, b) => s + (state.initialCashByBroker[b] || 0), 0);
     let cumCashFlow = 0;
     let minCum = 0;
     for (const tx of sorted) {
