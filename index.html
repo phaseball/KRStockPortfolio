@@ -223,7 +223,7 @@
 
 <div class="header">
   <div style="flex:1;min-width:0">
-    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v2.8</span></div>
+    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v3.0</span></div>
     <div style="font-size:11px;color:var(--text-dim);margin-top:2px;font-family:ui-monospace,monospace">
       <span id="verInfo">html-—</span> · <span id="priceInfo">시세-—</span>
     </div>
@@ -1045,37 +1045,47 @@ function renderOverview() {
   const txs = getTxsForBroker(state.activeBroker);
   const initialCash = getInitialCashForBroker(state.activeBroker);
   const holds = computeHoldings(txs);
-  const sum = computeSummary(txs, holds, state.prices, initialCash);
-  const uplPctTotal = sum.costBasis > 0 ? sum.unrealizedPL / sum.costBasis : null;
-  const earnPctTotal = initialCash > 0 ? sum.totalGain / initialCash : null;
-  const cashPct = sum.totalAsset > 0 ? sum.cash / sum.totalAsset : null;
 
-  // Get yesterday's values for % change calculation (use Korean timezone)
-  const todayKST = getKoreanToday();
-  const yesterdayKST = (() => {
-    const d = new Date(todayKST + 'T00:00:00');
-    d.setDate(d.getDate() - 1);
-    return getKoreanDate(d);
-  })();
-  
-  let yesterdayValues = { unrealizedPL: 0, cash: sum.cash, totalGain: 0, realizedPL: sum.realizedPL, totalAsset: 0 };
+  // ---- US_v4-style display: use daily_value_kr as the single source of truth ----
+  // The 4 cards (총수익, 현금, 평가손익, 실현손익) and their daily changes are derived
+  // from `_cachedDaily` entries via `computeStatsFromEntry`. This way the cards always
+  // agree with the value-history chart.
+  let latestEntry = null;
+  let prevEntry = null;
   if (_cachedDaily && _cachedDaily.length > 0) {
-    // Use broker-aware yesterday value (handles 'total' AND per-broker views)
-    const yTotalAsset = computeYesterdayBrokerValue(state.activeBroker, yesterdayKST);
-    if (yTotalAsset != null) {
-      yesterdayValues.totalAsset = yTotalAsset;
-      yesterdayValues.cash = sum.cash - sum.cashFlowToday;
-      yesterdayValues.totalGain = yTotalAsset - initialCash;
-      yesterdayValues.unrealizedPL = sum.unrealizedPL - sum.mvChange;
-      yesterdayValues.realizedPL = sum.realizedPL - sum.realizedPLToday;
-    }
-  } else if (!_dailyLoadingPromise && isConfigured()) {
-    // Background load on first overview render so daily change is correct without
-    // requiring user to visit the value-history page first.
+    latestEntry = _cachedDaily[_cachedDaily.length - 1];
+    prevEntry = findLastEntryBefore(latestEntry.date);
+  }
+  // Fallback: if cache is empty (first session or sheet not yet recalc'd), synthesize a
+  // live entry from state.prices so the cards aren't blank. Daily change will be 0 until
+  // a real cache row gets written by syncTodaysDailyValue().
+  if (!latestEntry) latestEntry = buildLiveEntry();
+
+  const sum = computeStatsFromEntry(state.activeBroker, latestEntry);
+  const prevStats = prevEntry ? computeStatsFromEntry(state.activeBroker, prevEntry) : null;
+
+  // If even the synthetic entry yields no stats, fall back to live computeSummary
+  // (e.g., no transactions or prices yet) — keeps cards rendering.
+  const liveSum = (!sum) ? computeSummary(txs, holds, state.prices, initialCash) : null;
+  const S = sum || liveSum;
+
+  // Per-card daily changes (today - yesterday). Use 0 when prev unavailable so the badge
+  // shows "▲0" instead of the full value bug.
+  const dTotal     = prevStats ? (S.totalGain     - prevStats.totalGain)     : 0;
+  const dCash      = prevStats ? (S.cash          - prevStats.cash)          : 0;
+  const dUnreal    = prevStats ? (S.unrealizedPL  - prevStats.unrealizedPL)  : 0;
+  const dRealized  = prevStats ? (S.realizedPL    - prevStats.realizedPL)    : 0;
+
+  const uplPctTotal = S.costBasis > 0 ? S.unrealizedPL / S.costBasis : null;
+  const earnPctTotal = initialCash > 0 ? S.totalGain / initialCash : null;
+  const cashPct = S.totalAsset > 0 ? S.cash / S.totalAsset : null;
+
+  // Background-load the daily cache the first time overview renders without one (so the
+  // user doesn't need to visit the value-history page first).
+  if (!_cachedDaily && !_dailyLoadingPromise && isConfigured()) {
     _dailyLoadingPromise = loadDailyValues().then(d => {
       _cachedDaily = d;
       _dailyLoadingPromise = null;
-      // Re-render overview now that yesterday data is available
       if (state.currentTab === 'overview' && !state.selectedCode && !state.showTotalChart) {
         renderOverview();
       }
@@ -1087,27 +1097,27 @@ function renderOverview() {
       <div class="card summary-card">
         <div class="label">📈 평가손익</div>
         <div class="row2">
-          <div class="value ${plClass(sum.unrealizedPL)}" style="white-space:nowrap">${fmtManSigned(sum.unrealizedPL)}${changeBadgeWithPct(sum.mvChange, sum.marketValue - sum.mvChange, true)}</div>
-          <div class="meta">평가&nbsp;${fmtMan(sum.marketValue)}<br>매수&nbsp;${fmtMan(sum.costBasis)}</div>
+          <div class="value ${plClass(S.unrealizedPL)}" style="white-space:nowrap">${fmtManSigned(S.unrealizedPL)}${changeBadgeWithPct(dUnreal, S.marketValue - dUnreal, true)}</div>
+          <div class="meta">평가&nbsp;${fmtMan(S.marketValue)}<br>매수&nbsp;${fmtMan(S.costBasis)}</div>
         </div>
       </div>
       <div class="card summary-card">
         <div class="label">💵 현금</div>
-        <div class="value" style="white-space:nowrap">${fmtMan(sum.cash)}${changeBadgeWithPct(sum.cashFlowToday, yesterdayValues.totalAsset || sum.totalAsset, true)}</div>
+        <div class="value" style="white-space:nowrap">${fmtMan(S.cash)}${changeBadgeWithPct(dCash, S.totalAsset, true)}</div>
         <div class="sub">${cashPct !== null ? `(총자산의 ${(cashPct * 100).toFixed(0)}%)` : ''}</div>
       </div>
       <div class="card summary-card" onclick="showTotalChart()" style="cursor:pointer" title="클릭하면 총자산 히스토리 차트">
         <div class="label">💰 총수익 ${earnPctTotal !== null ? `<span class="${plClass(earnPctTotal)}">(${fmtPct(earnPctTotal)})</span>` : ''}</div>
         <div class="row2">
-          <div class="value ${plClass(sum.totalGain)}" style="white-space:nowrap">${fmtManSigned(sum.totalGain)}${changeBadgeWithPct(sum.totalGain - yesterdayValues.totalGain, yesterdayValues.totalAsset)}</div>
-          <div class="meta">자산&nbsp;${fmtMan(sum.totalAsset)}<br>초기&nbsp;${fmtMan(sum.initialCash)}</div>
+          <div class="value ${plClass(S.totalGain)}" style="white-space:nowrap">${fmtManSigned(S.totalGain)}${changeBadgeWithPct(dTotal, S.totalAsset, true)}</div>
+          <div class="meta">자산&nbsp;${fmtMan(S.totalAsset)}<br>초기&nbsp;${fmtMan(S.initialCash)}</div>
         </div>
       </div>
       <div class="card summary-card">
         <div class="label">📊 실현손익 YTD</div>
         <div class="row2">
-          <div class="value ${plClass(sum.realizedPLYTD)}" style="white-space:nowrap">${fmtManSigned(sum.realizedPLYTD)}${changeBadge(sum.realizedPLToday, true)}</div>
-          <div class="meta">total&nbsp;${fmtManSigned(sum.realizedPL)}</div>
+          <div class="value ${plClass(S.realizedPLYTD)}" style="white-space:nowrap">${fmtManSigned(S.realizedPLYTD)}${changeBadge(dRealized, true)}</div>
+          <div class="meta">total&nbsp;${fmtManSigned(S.realizedPL)}</div>
         </div>
       </div>
     </div>
@@ -1143,7 +1153,7 @@ function renderOverview() {
   });
 
   // 비중 = 평가금액 / 총자산 (so stocks + cash sum to 100%)
-  const totalAsset = sum.totalAsset;
+  const totalAsset = S.totalAsset;
 
   const holdingsHtml = heldCodes.length === 0
     ? `<div class="empty"><div class="emoji">💼</div><div>현재 보유 종목 없음</div></div>`
@@ -1359,58 +1369,122 @@ function findLastEntryBefore(givenDate) {
   return best;
 }
 
-function computeYesterdayBrokerValue(broker, yesterdayKST) {
-  // Use the most recent entry strictly before TODAY (today = yesterdayKST + 1 day).
-  // This handles non-trading days (weekends, holidays) where the date "yesterday"
-  // might not have a row but Friday's row exists.
-  const todayKST = addOneDay(yesterdayKST);
-  const yEntry = findLastEntryBefore(todayKST);
-  if (!yEntry) return null;
-
-  // Use yEntry.prices for ALL views (even 'total') — this is the single source of truth
-  // and works regardless of whether yEntry.totalValue was written with or without ISA.
-  if (!yEntry.prices) {
-    // Fallback for old rows that lack the prices column: use totalValue with ISA caveat.
-    // This is intentionally NOT a hard failure — at least the user sees SOMETHING reasonable
-    // before they run 🔄 재계산.
-    if (broker === 'total' && typeof yEntry.totalValue === 'number') {
-      return yEntry.totalValue; // includes ISA — slight inaccuracy but no "full value" bug
-    }
-    return null;
-  }
+// Unified stats computation: walks all transactions for a broker (or 'total' = sum of non-ISA),
+// using `entry.prices` for market value. Returns all the values needed to render the 4 cards.
+// `entry` is one row of `_cachedDaily` (or a synthetic one built from live state).
+// This is the SINGLE SOURCE OF TRUTH for display — both 개요 and value-history chart use it,
+// so the numbers always agree.
+function computeStatsFromEntry(broker, entry) {
+  if (!entry) return null;
 
   if (broker === 'total') {
-    // 'total' = sum of all non-ISA brokers
-    let total = 0;
-    for (const b of BROKERS.filter(x => x !== 'ISA')) {
-      const v = computePerBrokerYesterdayValue(b, yEntry, yEntry.date);
-      if (v != null) total += v;
-    }
-    return total;
+    const parts = BROKERS.filter(b => b !== 'ISA')
+      .map(b => computeStatsFromEntry(b, entry))
+      .filter(x => x);
+    if (!parts.length) return null;
+    const init = parts.reduce((s, x) => s + x.initialCash, 0);
+    const totalAsset = parts.reduce((s, x) => s + x.totalAsset, 0);
+    return {
+      cash:          parts.reduce((s, x) => s + x.cash, 0),
+      marketValue:   parts.reduce((s, x) => s + x.marketValue, 0),
+      costBasis:     parts.reduce((s, x) => s + x.costBasis, 0),
+      realizedPL:    parts.reduce((s, x) => s + x.realizedPL, 0),
+      realizedPLYTD: parts.reduce((s, x) => s + x.realizedPLYTD, 0),
+      unrealizedPL:  parts.reduce((s, x) => s + x.unrealizedPL, 0),
+      totalAsset,
+      initialCash:   init,
+      totalGain:     totalAsset - init,
+    };
   }
 
-  return computePerBrokerYesterdayValue(broker, yEntry, yEntry.date);
+  // Per-broker: walk this broker's transactions up to entry's date in the SAME order
+  // as computeHoldings (date asc, buys-first, then seq). Track cash, positions, realized PL.
+  const asOfDate = entry.date;
+  const brokerTxs = state.transactions
+    .filter(t => t.broker === broker && t.date <= asOfDate)
+    .slice()
+    .sort((a, b) => {
+      if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+      const aIsBuy = a.qty > 0 ? 0 : 1;
+      const bIsBuy = b.qty > 0 ? 0 : 1;
+      if (aIsBuy !== bIsBuy) return aIsBuy - bIsBuy;
+      return (a.seq || 0) - (b.seq || 0);
+    });
+
+  const initialCash = state.initialCashByBroker[broker] || 0;
+  let cash = initialCash;
+  let realizedPL = 0;
+  let realizedPLYTD = 0;
+  const positions = {};                 // {code: {qty, avgCost}}
+  const curYear = asOfDate.slice(0, 4); // realizedPLYTD scoped to entry's year (KST)
+
+  for (const tx of brokerTxs) {
+    const txYear = tx.date.slice(0, 4);
+    if (tx.qty > 0) {
+      cash -= tx.settle;
+      const pos = positions[tx.code] || { qty: 0, avgCost: 0 };
+      const newCost = pos.qty * pos.avgCost + tx.qty * tx.price;
+      pos.qty += tx.qty;
+      pos.avgCost = pos.qty > 0 ? newCost / pos.qty : 0;
+      positions[tx.code] = pos;
+    } else {
+      cash += tx.settle;
+      const pos = positions[tx.code] || { qty: 0, avgCost: 0 };
+      const sellQty = -tx.qty;
+      const pl = sellQty * (tx.price - pos.avgCost) - (tx.fees || 0);
+      realizedPL += pl;
+      if (txYear === curYear) realizedPLYTD += pl;
+      pos.qty -= sellQty;
+      if (pos.qty <= 0) { pos.qty = 0; pos.avgCost = 0; }
+      positions[tx.code] = pos;
+    }
+  }
+
+  let marketValue = 0, costBasis = 0;
+  for (const code in positions) {
+    if (positions[code].qty <= 0) continue;
+    const p = entry.prices ? entry.prices[code] : null;
+    if (p == null) continue;
+    marketValue += positions[code].qty * p;
+    costBasis   += positions[code].qty * positions[code].avgCost;
+  }
+
+  const totalAsset = cash + marketValue;
+  return {
+    cash,
+    marketValue,
+    costBasis,
+    realizedPL,
+    realizedPLYTD,
+    unrealizedPL: marketValue - costBasis,
+    totalAsset,
+    initialCash,
+    totalGain: totalAsset - initialCash,
+  };
 }
 
-// Compute end-of-day totalAsset for a specific broker using yEntry's prices snapshot.
-// `asOfDate` is the cache entry's date (i.e., "as of end of that day"); we filter txs <= that.
+// Build a synthetic "today" entry from live state.prices. Used when _cachedDaily is empty
+// (e.g., first ever load) so the cards still render with current values.
+function buildLiveEntry() {
+  const livePrices = {};
+  for (const code in state.prices) {
+    const v = state.prices[code];
+    if (v && v.price != null) livePrices[code] = v.price;
+  }
+  return { date: getKoreanToday(), prices: livePrices, totalValue: null, cash: null };
+}
+
+// Backward-compat shims (some chart code still uses these names).
 function computePerBrokerYesterdayValue(broker, yEntry, asOfDate) {
-  if (!yEntry || !yEntry.prices) return null;
-  const brokerTxs = state.transactions.filter(t => t.broker === broker && t.date <= asOfDate);
-  const positions = {};
-  let cash = state.initialCashByBroker[broker] || 0;
-  for (const tx of brokerTxs) {
-    positions[tx.code] = (positions[tx.code] || 0) + tx.qty;
-    if (tx.qty > 0) cash -= tx.settle;
-    else cash += tx.settle;
-  }
-  let marketValue = 0;
-  for (const code in positions) {
-    if (positions[code] <= 0) continue;
-    const p = yEntry.prices[code];
-    if (p) marketValue += positions[code] * p;
-  }
-  return cash + marketValue;
+  const e = yEntry ? { ...yEntry, date: asOfDate || yEntry.date } : null;
+  const s = computeStatsFromEntry(broker, e);
+  return s ? s.totalAsset : null;
+}
+function computeYesterdayBrokerValue(broker, yesterdayKST) {
+  const e = findLastEntryBefore(addOneDay(yesterdayKST));
+  if (!e) return null;
+  const s = computeStatsFromEntry(broker, e);
+  return s ? s.totalAsset : null;
 }
 
 // Compute "non-ISA total value" for a daily cache entry. Falls back to entry.totalValue when
@@ -2943,6 +3017,10 @@ async function refreshPrices() {
   else toast(`${Object.keys(results).length}종목 시세 갱신`, 'success');
   if (state.currentTab === 'overview') renderOverview();
   if (state.currentTab === 'settings') renderSettings();
+  // Sync today's daily_value_kr row in the background (US_v4 style) so the cards and the
+  // value-history chart both pull from the same single source of truth — no more divergence
+  // between 개요 and Value History plot. Skips itself on weekends or stale prices.
+  syncTodaysDailyValue().catch(e => console.warn('post-fetch sync skipped:', e));
 }
 
 async function refreshAll() {
@@ -2969,101 +3047,103 @@ function addOneDay(yyyymmdd) {
   return d.toISOString().slice(0, 10);
 }
 
-async function autoCalcDailyValues() {
+// Returns true if `yyyymmdd` is Mon-Fri (KST). Doesn't account for Korean holidays
+// — those just produce a no-op no-new-prices day, harmless.
+function isTradingDayKST(yyyymmdd) {
+  const d = new Date(yyyymmdd + 'T00:00:00Z'); // UTC midnight, day-of-week is locale-free
+  const dow = d.getUTCDay();
+  return dow !== 0 && dow !== 6;
+}
+
+// Sync today's `daily_value_kr` row with current live state. Called after every successful
+// price fetch. Writes one row (today's), updates if it already exists, appends otherwise.
+// Skips writing if:
+//   - today is not a trading day (Sat/Sun) — keeps prevEntry as Friday's close
+//   - prices are stale (lastPriceFetchAt is not from today KST) — avoids 0 daily changes
+async function syncTodaysDailyValue() {
   try {
-    // Read all 5 columns so we can detect/replace today's row if it already exists
+    if (!isConfigured()) return;
+    if (!state.lastPriceFetchAt) return;
+    const todayKST = getKoreanToday();
+    if (!isTradingDayKST(todayKST)) {
+      console.log(`syncTodaysDailyValue: ${todayKST} is not a trading day, skipping`);
+      return;
+    }
+    const fetchDateKST = getKoreanDate(new Date(state.lastPriceFetchAt));
+    if (fetchDateKST !== todayKST) {
+      console.log(`syncTodaysDailyValue: prices from ${fetchDateKST}, not today (${todayKST}), skipping`);
+      return;
+    }
+
+    // Build today's row from current state: positions × current prices, all brokers (incl. ISA)
+    const txsToday = state.transactions.filter(t => t.date <= todayKST);
+    const holds = computeHoldings(txsToday);
+    let totalValue = 0, totalCash = 0;
+    for (const broker of BROKERS) {
+      const brokerTxs = txsToday.filter(t => t.broker === broker);
+      const initialCash = state.initialCashByBroker[broker] || 0;
+      const sum = computeSummary(brokerTxs, holds, state.prices, initialCash);
+      totalValue += sum.totalAsset;
+      totalCash  += sum.cash;
+    }
+    const holdingsMap = {};
+    const pricesMap = {};
+    for (const code in holds) {
+      if (holds[code].qty <= 0) continue;
+      const p = state.prices[code] ? state.prices[code].price : null;
+      if (p == null) continue;
+      holdingsMap[code] = Math.round(holds[code].qty * p);
+      pricesMap[code] = p;
+    }
+    const todayRow = [
+      todayKST,
+      Math.round(totalValue),
+      Math.round(totalCash),
+      JSON.stringify(holdingsMap),
+      JSON.stringify(pricesMap),
+    ];
+
+    // Find today's row in sheet (update if exists, else append)
     const rows = await sheetGet(`${DAILY_TAB}!A:E`);
-    if (!rows || rows.length < 2) return; // No data yet, skip
-
-    // Find latest existing date (skip blank trailing rows)
+    let todayRowIdx = -1;     // 0-based index into `rows`
     let lastDataIdx = -1;
-    for (let i = rows.length - 1; i >= 1; i--) {
-      if (rows[i] && rows[i][0]) { lastDataIdx = i; break; }
-    }
-    if (lastDataIdx === -1) return;
-
-    const lastDate = parseDate(rows[lastDataIdx][0]); // STRING "YYYY-MM-DD"
-    const todayKST = getKoreanToday();                 // STRING "YYYY-MM-DD"
-
-    if (lastDate >= todayKST) return; // already up to date
-
-    // Build list of missing day strings (lastDate+1 ... todayKST) — string compare, no Date object pitfalls
-    const missingDays = [];
-    let cursor = addOneDay(lastDate);
-    while (cursor <= todayKST) {
-      missingDays.push(cursor);
-      cursor = addOneDay(cursor);
-    }
-    if (missingDays.length === 0) return;
-
-    // For each missing day, compute totalValue/cash plus full holdings & prices snapshot.
-    // Note: we use current state.prices as a proxy for past days we don't have history for.
-    // This is acceptable for filling 1-2 day gaps (today + maybe yesterday) — for longer
-    // gaps the user should run the manual 🔄 재계산 which uses each day's stored data.
-    const newRows = [];
-    for (const dateStr of missingDays) {
-      const txsUpToDate = state.transactions.filter(t => t.date <= dateStr);
-      const holds = computeHoldings(txsUpToDate);
-
-      let totalValue = 0;
-      let totalCash = 0;
-      // Process ALL brokers (including ISA) so the prices column has every code.
-      // The 'total' view's ISA-exclusion is applied at display time, not at write time.
-      for (const broker of BROKERS) {
-        const brokerTxs = txsUpToDate.filter(t => t.broker === broker);
-        const initialCash = state.initialCashByBroker[broker] || 0;
-        const sum = computeSummary(brokerTxs, holds, state.prices, initialCash);
-        totalValue += sum.totalAsset;
-        totalCash  += sum.cash;
+    if (rows && rows.length >= 2) {
+      for (let i = 1; i < rows.length; i++) {
+        if (!rows[i] || !rows[i][0]) continue;
+        if (parseDate(rows[i][0]) === todayKST) todayRowIdx = i;
+        lastDataIdx = i;
       }
-
-      // Snapshot per-code holdings (market value) and prices (close-like price) for charts
-      const holdingsMap = {};
-      const pricesMap = {};
-      for (const code in holds) {
-        if (holds[code].qty <= 0) continue;
-        const p = state.prices[code] ? state.prices[code].price : null;
-        if (p == null) continue;
-        holdingsMap[code] = holds[code].qty * p;
-        pricesMap[code] = p;
-      }
-
-      newRows.push([dateStr, totalValue, totalCash, JSON.stringify(holdingsMap), JSON.stringify(pricesMap)]);
     }
+    const sheetRow1Based = (todayRowIdx >= 0) ? (todayRowIdx + 1) : (lastDataIdx + 2);
+    const range = `${DAILY_TAB}!A${sheetRow1Based}:E${sheetRow1Based}`;
 
-    // Write rows. Append after lastDataIdx (1-indexed in Sheets ⇒ row number = lastDataIdx + 1).
     const token = await getAccessToken();
-    const startRow = lastDataIdx + 2; // first empty data row
-    const range = `${DAILY_TAB}!A${startRow}:E${startRow + newRows.length - 1}`;
     await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${state.sheetId}/values/${range}?valueInputOption=USER_ENTERED`, {
       method: 'PUT',
       headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ values: newRows }),
+      body: JSON.stringify({ values: [todayRow] }),
     });
+    console.log(`syncTodaysDailyValue: ${todayRowIdx >= 0 ? 'updated' : 'appended'} ${todayKST} (totalValue=${Math.round(totalValue).toLocaleString()})`);
 
-    _cachedDaily = null;                      // force chart to reload fresh data
-    console.log(`Auto-calculated ${newRows.length} daily values (KST): ${missingDays.join(', ')}`);
-
-    // Re-fetch fresh cache and re-render overview so daily-change badges reflect the new data.
-    // Without this, the overview keeps showing the stale numbers it rendered before autoCalc ran
-    // (e.g., "총수익 daily change = full value" when yesterday's row was missing).
+    // Refresh cache + re-render so cards use the latest row immediately
+    _cachedDaily = null;
     try {
-      const fresh = await loadDailyValues();
-      _cachedDaily = fresh;
-      _dailyLoadingPromise = null;
+      _cachedDaily = await loadDailyValues();
       if (state.currentTab === 'overview' && !state.selectedCode && !state.showTotalChart) {
         renderOverview();
       } else if (state.currentTab === 'overview' && state.showTotalChart) {
         if (typeof drawTotalChart === 'function') drawTotalChart();
       }
     } catch (e) {
-      console.warn('Post-autoCalc reload failed:', e);
+      console.warn('syncTodaysDailyValue: cache reload failed', e);
     }
   } catch (e) {
-    console.warn('Auto-calc daily values failed:', e);
-    // Don't show error toast - this is a background operation
+    console.warn('syncTodaysDailyValue failed:', e);
   }
 }
+
+// Legacy alias — old callers still reference autoCalcDailyValues
+async function autoCalcDailyValues() { return syncTodaysDailyValue(); }
 
 function clearCache() {
   if (!confirm('로컬 캐시를 모두 삭제하시겠습니까? (Sheet 데이터는 영향 없음)')) return;
