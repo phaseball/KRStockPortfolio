@@ -223,7 +223,7 @@
 
 <div class="header">
   <div style="flex:1;min-width:0">
-    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v3.0</span></div>
+    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v3.1</span></div>
     <div style="font-size:11px;color:var(--text-dim);margin-top:2px;font-family:ui-monospace,monospace">
       <span id="verInfo">html-—</span> · <span id="priceInfo">시세-—</span>
     </div>
@@ -304,6 +304,7 @@ let state = {
   showTotalChart: false,
   chartPeriod: '2026',  // 'total' | '1y' | '6m' | '3m' | '2025' | '2026'
   tickerChartPeriod: '2026',  // same options, separate selection for ticker detail chart
+  chartScope: 'noisa',  // 'noisa' (default, = 삼성+키움+메리츠) | 'all' (incl ISA) | 'isa' (ISA only)
   chartScale: 'log',     // 'log' | 'linear'
   chartBenches: { '^KS11': true, '091160.KS': true, '^KQ11': true },  // KOSPI / KODEX반도체 / KOSDAQ
   currentTab: 'overview',
@@ -1282,13 +1283,22 @@ function backFromChart() {
 }
 function setChartPeriod(p) { state.chartPeriod = p; saveLocal(); drawTotalChart(); renderChartControls(); }
 function setChartScale(s) { state.chartScale = s; saveLocal(); drawTotalChart(); renderChartControls(); }
+function setChartScope(s) { state.chartScope = s; saveLocal(); drawTotalChart(); renderChartControls(); }
 function toggleBench(code, on) { state.chartBenches[code] = on; saveLocal(); drawTotalChart(); }
 
 function renderChartControls() {
   const el = document.getElementById('chart-controls-host');
   if (!el) return;
   const periods = ['total', '1y', '6m', '3m', '2025', '2026'];
+  const scopes = [
+    { v: 'noisa', label: '전체 (ISA 제외)' },
+    { v: 'all',   label: 'ALL (incl ISA)' },
+    { v: 'isa',   label: 'ISA only' },
+  ];
   el.innerHTML = `
+    <div><span class="lbl">범위</span>
+      ${scopes.map(s => `<button class="cbtn ${(state.chartScope||'noisa')===s.v?'on':''}" onclick="setChartScope('${s.v}')">${s.label}</button>`).join('')}
+    </div>
     <div><span class="lbl">기간</span>
       ${periods.map(p => `<button class="cbtn ${state.chartPeriod===p?'on':''}" onclick="setChartPeriod('${p}')">${p === 'total' ? 'TOTAL' : p.toUpperCase()}</button>`).join('')}
     </div>
@@ -1487,19 +1497,31 @@ function computeYesterdayBrokerValue(broker, yesterdayKST) {
   return s ? s.totalAsset : null;
 }
 
-// Compute "non-ISA total value" for a daily cache entry. Falls back to entry.totalValue when
-// prices snapshot is missing (old rows) — slightly inaccurate by ISA's contribution but
-// keeps the chart usable even before a fresh 재계산.
-function getDayNonISATotal(dailyEntry) {
+// Compute total value for a daily cache entry under the given scope.
+// scope: 'noisa' (삼성+키움+메리츠) | 'all' (every broker incl ISA) | 'isa' (ISA only)
+function getDayScopeTotal(dailyEntry, scope) {
   if (!dailyEntry) return null;
-  if (!dailyEntry.prices) return dailyEntry.totalValue;
+  scope = scope || 'noisa';
+  if (!dailyEntry.prices) {
+    // Old row missing the prices snapshot — fall back to stored totalValue if scope is 'all'
+    // (that's the historical meaning of column B). For 'noisa'/'isa' we can't reconstruct.
+    return scope === 'all' ? dailyEntry.totalValue : null;
+  }
+  if (scope === 'isa') {
+    const v = computePerBrokerYesterdayValue('ISA', dailyEntry, dailyEntry.date);
+    return v == null ? null : v;
+  }
   let total = 0;
-  for (const b of BROKERS.filter(x => x !== 'ISA')) {
+  const include = scope === 'all' ? BROKERS : BROKERS.filter(x => x !== 'ISA');
+  for (const b of include) {
     const v = computePerBrokerYesterdayValue(b, dailyEntry, dailyEntry.date);
     if (v != null) total += v;
   }
   return total;
 }
+
+// Back-compat alias — some older code calls getDayNonISATotal directly.
+function getDayNonISATotal(dailyEntry) { return getDayScopeTotal(dailyEntry, 'noisa'); }
 
 // Fetch full historical daily closes for a Yahoo symbol (indices supported with ^ prefix).
 async function fetchYahooHist(symbol, range = '5y') {
@@ -1574,15 +1596,16 @@ async function drawTotalChart() {
     return;
   }
 
-  // Pre-compute non-ISA total for every entry in series (so we don't repeat work in tooltip / summary)
-  const seriesNonISA = series.map(d => getDayNonISATotal(d) || 0);
+  // Pre-compute total per scope for every entry in series (so we don't repeat work in tooltip / summary)
+  const scope = state.chartScope || 'noisa';
+  const seriesScopeTotal = series.map(d => getDayScopeTotal(d, scope) || 0);
 
   // Normalize: base = previous TRADING day's non-ISA close (or first value if no previous day).
   // We look back through _cachedDaily (which only has trading days) to find the entry
   // immediately before series[0]. This makes period-to-period transitions seamless
   // (end of 2025 == start of 2026).
   const labels = series.map(d => d.date);
-  let baseValue = seriesNonISA[0] || 1;
+  let baseValue = seriesScopeTotal[0] || 1;
   if (state.chartPeriod !== 'total') {
     const firstDate = series[0].date;
     // Find the last _cachedDaily entry strictly before firstDate
@@ -1591,11 +1614,11 @@ async function drawTotalChart() {
       if (d.date < firstDate && (!prevEntry || d.date > prevEntry.date)) prevEntry = d;
     }
     if (prevEntry) {
-      const prevVal = getDayNonISATotal(prevEntry);
+      const prevVal = getDayScopeTotal(prevEntry, scope);
       if (prevVal) baseValue = prevVal;
     }
   }
-  const portfolioData = seriesNonISA.map(v => v / baseValue * 100);
+  const portfolioData = seriesScopeTotal.map(v => v / baseValue * 100);
 
   const benchDatasets = [];
   for (const b of enabledBenches) {
@@ -1697,12 +1720,14 @@ async function drawTotalChart() {
               const v = tctx.parsed.y;
               if (v == null) return '';
               const idx = tctx.dataIndex;
-              // Portfolio: just "105.3 (+₩50.2만)" without label - uses non-ISA total
+              // Portfolio: just "105.3 (+₩50.2만)" without label
               if (tctx.dataset.label === '내 포트폴리오' && series[idx]) {
-                const totalValue = seriesNonISA[idx];
-                // initialCash for 'total' already excludes ISA; this gives us the
-                // "전체 (ISA 제외)" totalGain that matches the cards on 개요.
-                const initialCash = getInitialCashForBroker('total');
+                const totalValue = seriesScopeTotal[idx];
+                // initialCash baseline matches scope: noisa = non-ISA, all = every broker, isa = ISA only.
+                let initialCash;
+                if (scope === 'isa')     initialCash = state.initialCashByBroker['ISA'] || 0;
+                else if (scope === 'all') initialCash = BROKERS.reduce((s, b) => s + (state.initialCashByBroker[b] || 0), 0);
+                else                      initialCash = getInitialCashForBroker('total'); // noisa
                 const totalGain = totalValue - initialCash;
                 return `${v.toFixed(1)} (${fmtManSigned(totalGain)})`;
               }
@@ -1822,6 +1847,7 @@ function renderChartSummary(periodSeries) {
     el.innerHTML = '<div class="card" style="margin-top:8px;padding:12px;color:var(--text-faint)">데이터 없음</div>';
     return;
   }
+  const scope = state.chartScope || 'noisa';
 
   // Find the entry strictly before a given date (uses _cachedDaily — only trading days).
   // Returns null if no earlier entry exists.
@@ -1839,8 +1865,8 @@ function renderChartSummary(periodSeries) {
     if (!rows || !rows.length) return `<div style="color:var(--text-faint);font-size:13px">${label}: 데이터 없음</div>`;
     const firstRow = rows[0];
     const prevTrading = lastBefore(firstRow.date);
-    const startValue = (prevTrading ? getDayNonISATotal(prevTrading) : getDayNonISATotal(firstRow)) || 0;
-    const endValue = getDayNonISATotal(rows[rows.length - 1]) || 0;
+    const startValue = (prevTrading ? getDayScopeTotal(prevTrading, scope) : getDayScopeTotal(firstRow, scope)) || 0;
+    const endValue = getDayScopeTotal(rows[rows.length - 1], scope) || 0;
     const diff = endValue - startValue;
     const pct = startValue > 0 ? diff / startValue : null;
     const cls = plClass(diff);
@@ -1874,7 +1900,9 @@ function renderChartSummary(periodSeries) {
 // Matches computeHoldings() logic exactly: moving-average cost, fees applied to realized PL.
 function computeTickerTimeSeries(code) {
   if (!_cachedDaily || !_cachedDaily.length) return null;
-  const txs = state.transactions
+  // Filter by active broker so the chart's 실현손익 line matches the card on 개요.
+  const brokerTxs = getTxsForBroker(state.activeBroker);
+  const txs = brokerTxs
     .filter(t => t.code === code)
     .slice()
     .sort((a, b) => a.date < b.date ? -1 : (a.date > b.date ? 1 : 0));
@@ -2055,8 +2083,11 @@ function drawTickerChart(code) {
 function renderTickerDetail(code) {
   const root = document.getElementById('tab-overview');
   const name = state.names[code] || code;
-  const txs = state.transactions.filter(t => t.code === code);
-  const holds = computeHoldings(state.transactions);
+  // Filter by active broker so realized PL etc. match the cards on 개요.
+  // (Previously we walked ALL transactions which over-counted for users on 전체/ISA tabs.)
+  const brokerTxs = getTxsForBroker(state.activeBroker);
+  const txs = brokerTxs.filter(t => t.code === code);
+  const holds = computeHoldings(brokerTxs);
   const h = holds[code] || { qty: 0, avgCost: 0, realizedPL: 0, realizedPLThisYear: 0 };
   const priceObj = state.prices[code];
   const curPrice = priceObj ? priceObj.price : null;
@@ -2108,7 +2139,7 @@ function renderTickerDetail(code) {
   // Transactions table for this code, processed in the SAME order as the holdings compute
   // (date asc, buys-first within same date, then sheet row order)
   // — this is what the running balance reflects.
-  const txsForCode = state.transactions.filter(t => t.code === code);
+  const txsForCode = brokerTxs.filter(t => t.code === code);
   let runningQty = 0;
   let clampEvents = 0;
   const walked = txsForCode.map(t => {
