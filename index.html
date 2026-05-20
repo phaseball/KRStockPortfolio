@@ -223,7 +223,7 @@
 
 <div class="header">
   <div style="flex:1;min-width:0">
-    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v3.1</span></div>
+    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v3.2</span></div>
     <div style="font-size:11px;color:var(--text-dim);margin-top:2px;font-family:ui-monospace,monospace">
       <span id="verInfo">html-—</span> · <span id="priceInfo">시세-—</span>
     </div>
@@ -1331,9 +1331,18 @@ async function renderTotalChart() {
 }
 
 async function recalcAndRefreshChart() {
+  // Ensure state.transactions reflects whatever's in the Sheet RIGHT NOW (in case the
+  // user pasted new rows directly into the Sheet between sessions). Without this, recalc
+  // would rebuild daily_value_kr using stale in-memory transactions.
+  try { await refreshTransactions(); } catch (e) { console.warn('refreshTransactions before recalc failed:', e); }
   await recalcDailyValues();
   _cachedDaily = null;
-  await drawTotalChart();
+  // Reload cache from the freshly-written sheet
+  try { _cachedDaily = await loadDailyValues(); } catch (e) { console.warn('loadDailyValues after recalc failed:', e); }
+  // Re-render whichever view is showing (overview, ticker detail, total chart, etc.)
+  // — rerenderCurrentView → renderOverview will route to renderTotalChart if showTotalChart
+  // is set, which in turn calls drawTotalChart. So a single rerender covers everything.
+  rerenderCurrentView();
 }
 
 // Load daily_value_kr from Sheet (date, totalValue, cash, holdings, prices)
@@ -2609,12 +2618,34 @@ async function commitInput() {
     for (const [broker, rs] of Object.entries(byBroker)) {
       await sheetAppend(`${broker}!A:G`, rs);
     }
-    toast(`✓ ${lastParsedInput.rows.length}건 추가 완료. 거래내역 다시 로드 중...`, 'success');
+    toast(`✓ ${lastParsedInput.rows.length}건 추가 완료. 거래내역 갱신 중...`, 'success');
     lastParsedInput = { rows: [], errors: [] };
     clearInputForm();
+    // 1) Reload state.transactions from the Sheet so the new rows take effect everywhere
     await refreshTransactions();
+    // 2) Write/update today's daily_value_kr row so cards, ticker pages, and chart all
+    //    reflect the new transactions immediately (no separate "재계산" needed for today)
+    await syncTodaysDailyValue();
+    // 3) Re-render whatever view the user is currently on
+    rerenderCurrentView();
   } catch (e) {
     toast('추가 실패: ' + e.message, 'error');
+  }
+}
+
+// Re-render whichever view the user is on. Used after data-mutating actions
+// (committing new transactions, recalculating daily values, etc.) so the UI
+// updates without requiring the user to navigate away and back.
+function rerenderCurrentView() {
+  if (state.currentTab === 'overview') {
+    // selectedCode is handled inside renderOverview (which delegates to renderTickerDetail)
+    renderOverview();
+  } else if (state.currentTab === 'history') {
+    renderHistory();
+  } else if (state.currentTab === 'input') {
+    renderInput();
+  } else if (state.currentTab === 'settings') {
+    renderSettings();
   }
 }
 
