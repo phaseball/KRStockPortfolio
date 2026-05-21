@@ -223,7 +223,7 @@
 
 <div class="header">
   <div style="flex:1;min-width:0">
-    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v3.2</span></div>
+    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v3.3</span></div>
     <div style="font-size:11px;color:var(--text-dim);margin-top:2px;font-family:ui-monospace,monospace">
       <span id="verInfo">html-—</span> · <span id="priceInfo">시세-—</span>
     </div>
@@ -723,17 +723,25 @@ async function loadConfig() {
 
 // ============ PRICE FETCHING ============
 // Yahoo Finance for KR stocks: numeric code + ".KS" (KOSPI) or ".KQ" (KOSDAQ)
+// Each entry is a builder: takes a yahoo URL, returns the full proxied URL.
+// Some proxies cache by URL; we append `disableCache=true` where supported and always
+// add a `_t` cache-buster to the inner Yahoo URL so each fetch gets fresh data.
 const CORS_PROXIES = [
-  'https://corsproxy.io/?',
-  'https://api.allorigins.win/raw?url=',
+  (yahooUrl) => 'https://corsproxy.io/?' + encodeURIComponent(yahooUrl),
+  (yahooUrl) => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(yahooUrl) + '&disableCache=true',
 ];
 
 // Single-symbol fetch returning full meta+series snapshot. Caller decides which to keep.
+// Uses cache-busting (URL `_t` param + fetch `cache: 'no-store'`) so the user sees prices
+// as fresh as Yahoo Finance's own website (was: ~5-15min delayed because proxies cached).
 async function _fetchYahooOne(symbol, range = '1mo') {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=${range}`;
-  for (const proxy of CORS_PROXIES) {
+  const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=${range}&_t=${Date.now()}`;
+  for (const buildProxyUrl of CORS_PROXIES) {
     try {
-      const r = await fetch(proxy + encodeURIComponent(url), { signal: AbortSignal.timeout(10000) });
+      const r = await fetch(buildProxyUrl(yahooUrl), {
+        signal: AbortSignal.timeout(10000),
+        cache: 'no-store',                // bypass browser HTTP cache
+      });
       if (!r.ok) continue;
       const d = await r.json();
       const result = d?.chart?.result?.[0];
@@ -824,12 +832,16 @@ async function fetchAllPrices(codes) {
   return { results, failed };
 }
 
-// Single-symbol historical fetch. Caller picks.
+// Single-symbol historical fetch. Caller picks. Historical data doesn't need to be
+// real-time, but we still cache-bust to make sure proxies don't return stale results.
 async function _fetchYahooHistOne(symbol, fromTs, toTs) {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?period1=${fromTs}&period2=${toTs}&interval=1d`;
-  for (const proxy of CORS_PROXIES) {
+  const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?period1=${fromTs}&period2=${toTs}&interval=1d&_t=${Date.now()}`;
+  for (const buildProxyUrl of CORS_PROXIES) {
     try {
-      const r = await fetch(proxy + encodeURIComponent(url), { signal: AbortSignal.timeout(20000) });
+      const r = await fetch(buildProxyUrl(yahooUrl), {
+        signal: AbortSignal.timeout(20000),
+        cache: 'no-store',
+      });
       if (!r.ok) continue;
       const d = await r.json();
       const result = d?.chart?.result?.[0];
@@ -1534,10 +1546,10 @@ function getDayNonISATotal(dailyEntry) { return getDayScopeTotal(dailyEntry, 'no
 
 // Fetch full historical daily closes for a Yahoo symbol (indices supported with ^ prefix).
 async function fetchYahooHist(symbol, range = '5y') {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=${range}`;
-  for (const proxy of CORS_PROXIES) {
+  const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=${range}&_t=${Date.now()}`;
+  for (const buildProxyUrl of CORS_PROXIES) {
     try {
-      const r = await fetch(proxy + encodeURIComponent(url));
+      const r = await fetch(buildProxyUrl(yahooUrl), { cache: 'no-store' });
       if (!r.ok) continue;
       const data = await r.json();
       const result = data.chart && data.chart.result && data.chart.result[0];
