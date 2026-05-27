@@ -223,7 +223,7 @@
 
 <div class="header">
   <div style="flex:1;min-width:0">
-    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v3.3</span></div>
+    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v3.4</span></div>
     <div style="font-size:11px;color:var(--text-dim);margin-top:2px;font-family:ui-monospace,monospace">
       <span id="verInfo">html-—</span> · <span id="priceInfo">시세-—</span>
     </div>
@@ -1142,6 +1142,8 @@ function renderOverview() {
     const name = state.names[code] || '';
     if (name === 'KODEX 코스피' || name === 'KODEX 레버리지') return '__KOSPI__';
     if (name === 'KODEX 반도체' || name === 'KODEX 반도체레버리지') return '__SEMI__';
+    if (/^삼성전자(?:$|\s|2)/.test(name) || /삼성전자.*레버리지/.test(name)) return '__SAMSUNG__';
+    if (/^SK하이닉스(?:$|\s)/.test(name) || /하이닉스.*레버리지/.test(name)) return '__HYNIX__';
     if (/나스닥100.*레버리지/.test(name)) return '__NASDAQ100_LEV__';
     if (/S&P\s*500.*레버리지/i.test(name)) return '__SP500_LEV__';
     return code; // each ungrouped stock is its own "group"
