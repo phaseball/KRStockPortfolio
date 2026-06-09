@@ -223,7 +223,7 @@
 
 <div class="header">
   <div style="flex:1;min-width:0">
-    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v3.5</span></div>
+    <div class="header-title">📈 국내주식 포트폴리오 <span style="font-size:10px;color:#888;font-weight:400">v3.6</span></div>
     <div style="font-size:11px;color:var(--text-dim);margin-top:2px;font-family:ui-monospace,monospace">
       <span id="verInfo">html-—</span> · <span id="priceInfo">시세-—</span>
     </div>
@@ -776,6 +776,12 @@ async function _fetchYahooOne(symbol, range = '1mo') {
 // (Yahoo may return stale data for a delisted listing under one suffix while the active
 // listing lives under the other suffix — for example 에스티큐브 052020 is KOSDAQ, but
 // 052020.KS could return cached data for a different/delisted stock.)
+// Module-level cache: code → { 'YYYY-MM-DD' (KST): close }
+// Populated by fetchYahooPrice (reuses the 1mo series it already fetches).
+// Used by syncRecentDailyValues to back-fill recent daily_value_kr rows without
+// making any additional Yahoo calls. Not persisted (localStorage stays small).
+let _priceHistoryCache = {};
+
 async function fetchYahooPrice(code) {
   const numCode = stripA(code);
   const cached = state.codeMarket?.[code];
@@ -811,6 +817,16 @@ async function fetchYahooPrice(code) {
   // Cache market suffix
   if (!state.codeMarket) state.codeMarket = {};
   state.codeMarket[code] = winner.sfx;
+
+  // Cache the full daily-close series (by KST date) for syncRecentDailyValues
+  const seriesByDate = {};
+  for (const pt of winner.snap.series) {
+    if (pt.close != null) seriesByDate[getKoreanDate(new Date(pt.ts * 1000))] = pt.close;
+  }
+  // Today's bar (intraday): include the latest snapshot price as today's value
+  // so weekend/after-hours sync can still record today's row.
+  seriesByDate[todayISO] = price;
+  _priceHistoryCache[code] = seriesByDate;
 
   return {
     price,
@@ -3141,95 +3157,184 @@ function isTradingDayKST(yyyymmdd) {
   return dow !== 0 && dow !== 6;
 }
 
-// Sync today's `daily_value_kr` row with current live state. Called after every successful
-// price fetch. Writes one row (today's), updates if it already exists, appends otherwise.
-// Skips writing if:
-//   - today is not a trading day (Sat/Sun) — keeps prevEntry as Friday's close
-//   - prices are stale (lastPriceFetchAt is not from today KST) — avoids 0 daily changes
-async function syncTodaysDailyValue() {
+// Sync daily_value_kr from the last stored date through today, INCLUSIVE of the last
+// stored date itself (so its close gets refreshed). Called after every successful price
+// fetch.
+//   - Always processes lastStoredDate (refreshes its close even if it equals today)
+//   - Adds every trading day between lastStoredDate and today (backfills any missed days)
+//   - Fetches REAL historical closes for the whole window (fetchAllHistorical) so every
+//     missed day gets a correct price — not just whatever the 1mo snapshot cache held.
+//     Forward-fill (seeded from the last stored row) keeps held positions from dropping
+//     out when Yahoo lacks an exact date.
+//   - Today prefers the live snapshot price so the latest close is always recorded.
+//   - Recomputes daily values for every day in the window and upserts them to the sheet.
+async function syncRecentDailyValues() {
   try {
     if (!isConfigured()) return;
-    if (!state.lastPriceFetchAt) return;
-    const todayKST = getKoreanToday();
-    if (!isTradingDayKST(todayKST)) {
-      console.log(`syncTodaysDailyValue: ${todayKST} is not a trading day, skipping`);
-      return;
-    }
-    const fetchDateKST = getKoreanDate(new Date(state.lastPriceFetchAt));
-    if (fetchDateKST !== todayKST) {
-      console.log(`syncTodaysDailyValue: prices from ${fetchDateKST}, not today (${todayKST}), skipping`);
-      return;
-    }
+    if (!state.transactions.length) return;
 
-    // Build today's row from current state: positions × current prices, all brokers (incl. ISA)
-    const txsToday = state.transactions.filter(t => t.date <= todayKST);
-    const holds = computeHoldings(txsToday);
-    let totalValue = 0, totalCash = 0;
-    for (const broker of BROKERS) {
-      const brokerTxs = txsToday.filter(t => t.broker === broker);
-      const initialCash = state.initialCashByBroker[broker] || 0;
-      const sum = computeSummary(brokerTxs, holds, state.prices, initialCash);
-      totalValue += sum.totalAsset;
-      totalCash  += sum.cash;
-    }
-    const holdingsMap = {};
-    const pricesMap = {};
-    for (const code in holds) {
-      if (holds[code].qty <= 0) continue;
-      const p = state.prices[code] ? state.prices[code].price : null;
-      if (p == null) continue;
-      holdingsMap[code] = Math.round(holds[code].qty * p);
-      pricesMap[code] = p;
-    }
-    const todayRow = [
-      todayKST,
-      Math.round(totalValue),
-      Math.round(totalCash),
-      JSON.stringify(holdingsMap),
-      JSON.stringify(pricesMap),
-    ];
-
-    // Find today's row in sheet (update if exists, else append)
     const rows = await sheetGet(`${DAILY_TAB}!A:E`);
-    let todayRowIdx = -1;     // 0-based index into `rows`
+    const todayKST = getKoreanToday();
+
+    // Find last stored date + its row index
+    let lastStoredDate = null;
     let lastDataIdx = -1;
-    if (rows && rows.length >= 2) {
-      for (let i = 1; i < rows.length; i++) {
-        if (!rows[i] || !rows[i][0]) continue;
-        if (parseDate(rows[i][0]) === todayKST) todayRowIdx = i;
-        lastDataIdx = i;
+    if (rows && rows.length > 1) {
+      for (let i = rows.length - 1; i >= 1; i--) {
+        if (rows[i] && rows[i][0]) {
+          lastStoredDate = parseDate(rows[i][0]);
+          lastDataIdx = i;
+          break;
+        }
       }
     }
-    const sheetRow1Based = (todayRowIdx >= 0) ? (todayRowIdx + 1) : (lastDataIdx + 2);
-    const range = `${DAILY_TAB}!A${sheetRow1Based}:E${sheetRow1Based}`;
+    if (!lastStoredDate) {
+      console.log('syncRecentDailyValues: sheet empty — run 재계산 first');
+      return;
+    }
+
+    // Build days to process: always include lastStoredDate, then every trading day up to today
+    const days = [lastStoredDate];
+    let cursor = addOneDay(lastStoredDate);
+    while (cursor <= todayKST) {
+      if (isTradingDayKST(cursor)) days.push(cursor);
+      cursor = addOneDay(cursor);
+    }
+    if (days.length > 250) {
+      console.warn(`syncRecentDailyValues: ${days.length} days behind — run full 재계산 instead`);
+      toast(`${days.length}일 미동기화 — 전체 재계산을 실행하세요`, 'error');
+      return;
+    }
+    if (days.length > 40) {
+      toast(`${days.length}일 백필 중... 잠시만 기다려주세요`, 'success');
+    }
+
+    // ---- Fetch REAL historical closes for the whole window so every missed day gets a
+    // correct price (requirement: "price fetching shall be done for all last days to today").
+    // Union of codes held with qty>0 on any day in the window.
+    const windowCodes = new Set();
+    for (const date of days) {
+      const h = computeHoldings(state.transactions.filter(t => t.date <= date));
+      for (const code in h) if (h[code].qty > 0) windowCodes.add(code);
+    }
+    const histByCode = {};   // code -> { 'YYYY-MM-DD': close }
+    if (windowCodes.size) {
+      try {
+        toast(`일별 시세 보정 중... (${windowCodes.size}종목 · ${days.length}일)`);
+        const { result } = await fetchAllHistorical([...windowCodes], lastStoredDate, todayKST);
+        Object.assign(histByCode, result);
+      } catch (e) {
+        console.warn('syncRecentDailyValues: historical fetch failed, using snapshot cache', e);
+      }
+    }
+    // Price lookup: real historical close first, snapshot cache as secondary (covers today's
+    // intraday bar and any code the historical endpoint happened to miss).
+    const priceFor = (code, date) => histByCode[code]?.[date] ?? _priceHistoryCache[code]?.[date];
+
+    // Seed forward-fill from the prices already stored on the last row, so a held code that
+    // Yahoo can't return for an exact date never drops out of the valuation.
+    const lastKnown = {};
+    try {
+      const prevPricesRaw = rows[lastDataIdx]?.[4];
+      if (prevPricesRaw) {
+        const prev = JSON.parse(prevPricesRaw);
+        for (const c in prev) if (prev[c] != null) lastKnown[c] = prev[c];
+      }
+    } catch (e) { /* ignore malformed prev prices */ }
+
+    // For each day, recompute the row. `days` is ascending, so forward-fill is valid.
+    const newRows = [];
+    for (const date of days) {
+      const txsUpTo = state.transactions.filter(t => t.date <= date);
+      const holds = computeHoldings(txsUpTo);
+
+      const pricesForDay = {};
+      for (const code in holds) {
+        if (holds[code].qty <= 0) continue;
+        let p = priceFor(code, date);
+        // Today: prefer the live snapshot so the latest close is always recorded.
+        if (date === todayKST && state.prices[code]?.price != null) {
+          p = state.prices[code].price;
+        }
+        if (p != null) lastKnown[code] = p;   // update forward-fill anchor
+        else p = lastKnown[code];             // forward-fill across a missing date
+        if (p != null) pricesForDay[code] = p;
+      }
+
+      // Skip a day only if there ARE held positions but we got no price for any of them
+      // (avoids writing a garbage zero row). All-cash days (no positions) still get written.
+      const heldCodes = Object.keys(holds).filter(c => holds[c].qty > 0);
+      if (heldCodes.length > 0 && Object.keys(pricesForDay).length === 0) {
+        console.log(`syncRecentDailyValues: skipping ${date} — no prices for held positions`);
+        continue;
+      }
+
+      // Per-broker totals (all brokers incl. ISA — display-time ISA-exclusion happens elsewhere)
+      let totalValue = 0, totalCash = 0;
+      for (const broker of BROKERS) {
+        const brokerTxs = txsUpTo.filter(t => t.broker === broker);
+        const initialCash = state.initialCashByBroker[broker] || 0;
+        const stateLikePrices = {};
+        for (const c in pricesForDay) stateLikePrices[c] = { price: pricesForDay[c] };
+        const sum = computeSummary(brokerTxs, holds, stateLikePrices, initialCash);
+        totalValue += sum.totalAsset;
+        totalCash  += sum.cash;
+      }
+
+      const holdingsMap = {};
+      const pricesMap = {};
+      for (const code in pricesForDay) {
+        const qty = holds[code]?.qty || 0;
+        if (qty <= 0) continue;
+        holdingsMap[code] = Math.round(qty * pricesForDay[code]);
+        pricesMap[code]   = pricesForDay[code];
+      }
+
+      newRows.push([
+        date,
+        Math.round(totalValue),
+        Math.round(totalCash),
+        JSON.stringify(holdingsMap),
+        JSON.stringify(pricesMap),
+      ]);
+    }
+
+    if (!newRows.length) {
+      console.log('syncRecentDailyValues: nothing to write');
+      return;
+    }
+
+    // Write: first row replaces lastDataIdx; remainder append after.
+    const startRow = lastDataIdx + 1; // 1-based sheet row
+    const endRow   = startRow + newRows.length - 1;
+    const range = `${DAILY_TAB}!A${startRow}:E${endRow}`;
 
     const token = await getAccessToken();
     await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${state.sheetId}/values/${range}?valueInputOption=USER_ENTERED`, {
       method: 'PUT',
       headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ values: [todayRow] }),
+      body: JSON.stringify({ values: newRows }),
     });
-    console.log(`syncTodaysDailyValue: ${todayRowIdx >= 0 ? 'updated' : 'appended'} ${todayKST} (totalValue=${Math.round(totalValue).toLocaleString()})`);
+    console.log(`syncRecentDailyValues: wrote ${newRows.length} rows (${newRows[0][0]} → ${newRows[newRows.length-1][0]})`);
 
-    // Refresh cache + re-render so cards use the latest row immediately
+    // Reload cache + re-render whatever the user is looking at
     _cachedDaily = null;
     try {
       _cachedDaily = await loadDailyValues();
-      if (state.currentTab === 'overview' && !state.selectedCode && !state.showTotalChart) {
-        renderOverview();
-      } else if (state.currentTab === 'overview' && state.showTotalChart) {
-        if (typeof drawTotalChart === 'function') drawTotalChart();
-      }
+      rerenderCurrentView();
     } catch (e) {
-      console.warn('syncTodaysDailyValue: cache reload failed', e);
+      console.warn('syncRecentDailyValues: cache reload failed', e);
     }
   } catch (e) {
-    console.warn('syncTodaysDailyValue failed:', e);
+    console.warn('syncRecentDailyValues failed:', e);
   }
 }
 
+// Backward-compatibility alias — anything that used to call the old name still works.
+async function syncTodaysDailyValue() { return syncRecentDailyValues(); }
+
 // Legacy alias — old callers still reference autoCalcDailyValues
-async function autoCalcDailyValues() { return syncTodaysDailyValue(); }
+async function autoCalcDailyValues() { return syncRecentDailyValues(); }
 
 function clearCache() {
   if (!confirm('로컬 캐시를 모두 삭제하시겠습니까? (Sheet 데이터는 영향 없음)')) return;
