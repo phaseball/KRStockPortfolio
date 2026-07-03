@@ -322,6 +322,7 @@ let _cachedDaily = null;
 let _dailyLoadingPromise = null;
 let _cachedBench = {};   // code → { 'YYYY-MM-DD': close }
 let _chartInstance = null;
+let _cashChartInstance = null;
 
 function saveLocal() {
   const persist = {
@@ -1035,6 +1036,7 @@ function switchTab(name) {
     state.selectedCode = null;
     state.showTotalChart = false;
     if (_chartInstance) { _chartInstance.destroy(); _chartInstance = null; }
+    if (_cashChartInstance) { _cashChartInstance.destroy(); _cashChartInstance = null; }
     saveLocal();
   }
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
@@ -1314,6 +1316,7 @@ function showTotalChart() {
 function backFromChart() {
   state.showTotalChart = false;
   if (_chartInstance) { _chartInstance.destroy(); _chartInstance = null; }
+  if (_cashChartInstance) { _cashChartInstance.destroy(); _cashChartInstance = null; }
   saveLocal();
   renderOverview();
 }
@@ -1358,6 +1361,10 @@ async function renderTotalChart() {
     <div id="chart-controls-host" class="chart-controls"></div>
     <div class="chart-canvas-wrap">
       <canvas id="chartCanvas" style="width:100%;height:420px"></canvas>
+    </div>
+    <div class="chart-canvas-wrap" style="margin-top:10px">
+      <div style="font-size:11px;color:var(--text-faint);margin-bottom:6px">💵 현금</div>
+      <canvas id="cashChartCanvas" style="width:100%;height:120px"></canvas>
     </div>
     <div id="chartStatus" style="font-size:11px;color:var(--text-faint);text-align:center;padding:6px"></div>
     <div id="chartSummary" style="margin-top:12px"></div>
@@ -1710,6 +1717,7 @@ async function drawTotalChart() {
 
   // Draw
   if (_chartInstance) { _chartInstance.destroy(); _chartInstance = null; }
+  if (_cashChartInstance) { _cashChartInstance.destroy(); _cashChartInstance = null; }
   const ctx = document.getElementById('chartCanvas').getContext('2d');
   _chartInstance = new Chart(ctx, {
     type: 'line',
@@ -1883,8 +1891,88 @@ async function drawTotalChart() {
   const staleNote = stale ? ` · ⚠ 최신 거래일(${newestTx})까지 미반영 → "🔄 재계산" 클릭` : '';
   status.innerHTML = `${series.length}일 · ${startD} → ${endD} · ${(portfolioEnd-100).toFixed(1)}% (base=100, ${state.chartScale} scale) · daily_value 최종: <b>${newestData}</b>${staleNote}`;
 
+  // ── Cash subplot: total cash over the same period, scope-consistent with the main chart.
+  drawCashSubchart(series, scope);
+
   // Summary table: chosen period + each year (2025, 2026)
   renderChartSummary(series);
+}
+
+// Small line chart of total cash (원, shown in 만 units) for the given daily series.
+// Cash is derived from transactions only (computeStatsFromEntry), so it's correct even
+// for daily_value rows that predate the per-day price snapshot.
+function drawCashSubchart(series, scope) {
+  const canvas = document.getElementById('cashChartCanvas');
+  if (!canvas) return;
+  if (_cashChartInstance) { _cashChartInstance.destroy(); _cashChartInstance = null; }
+
+  const scopeBroker = scope === 'isa' ? 'ISA' : (scope === 'all' ? 'all' : 'total');
+  const labels = series.map(d => d.date);
+  const cashData = series.map(d => {
+    const st = computeStatsFromEntry(scopeBroker, d);
+    return st ? st.cash : null;
+  });
+
+  const fmtMan = v => {
+    if (v == null) return '';
+    const m = v / 10000;
+    if (Math.abs(m) >= 10000) return (m / 10000).toFixed(1) + '억';
+    if (Math.abs(m) >= 1) return Math.round(m).toLocaleString() + '만';
+    return Math.round(v).toLocaleString();
+  };
+
+  const ctx = canvas.getContext('2d');
+  _cashChartInstance = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: '현금',
+        data: cashData,
+        borderColor: '#f59e0b',
+        backgroundColor: 'rgba(245,158,11,0.12)',
+        borderWidth: 1.5,
+        tension: 0,
+        pointRadius: 0,
+        fill: true,
+        spanGaps: true,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { mode: 'index', intersect: false },
+      layout: { padding: { right: 60 } },
+      scales: {
+        x: {
+          type: 'category',
+          ticks: { color: '#888', maxTicksLimit: 8, font: { size: 10 } },
+          grid: { color: 'rgba(255,255,255,0.05)' },
+        },
+        y: {
+          ticks: { color: '#888', font: { size: 10 }, maxTicksLimit: 4, callback: v => fmtMan(v) },
+          grid: { color: 'rgba(255,255,255,0.05)' },
+        },
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          mode: 'index', intersect: false,
+          backgroundColor: 'rgba(0,0,0,0.85)',
+          titleColor: '#fff',
+          bodyColor: '#e5e5e5',
+          bodyFont: { size: 12, family: 'ui-monospace, monospace' },
+          padding: 8,
+          cornerRadius: 6,
+          displayColors: false,
+          callbacks: {
+            label: (tctx) => tctx.parsed.y == null ? '' : `현금: ${Math.round(tctx.parsed.y).toLocaleString()} 원`,
+          },
+        },
+      },
+    },
+  });
 }
 
 function renderChartSummary(periodSeries) {
