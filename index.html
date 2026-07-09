@@ -2290,7 +2290,7 @@ function renderTickerDetail(code) {
     return { ...t, runningQty };
   });
 
-  const rows = [...walked].reverse().map(t => {
+  const renderTxRow = (t) => {
     const splitBadge = t.splitRaw ? ` <span style="color:var(--warn);font-size:10px">[split ${escapeHtml(t.splitRaw)}]</span>` : '';
     const qtyCell = t.splitRaw ? `${signed(t.qty)}<br><span class="text-faint" style="font-size:10px">(원본 ${signed(t.origQty)})</span>` : signed(t.qty);
     const priceCell = t.splitRaw ? `${fmtMan3(t.price)}<br><span class="text-faint" style="font-size:10px">(원본 ${fmtMan3(t.origPrice)})</span>` : fmtMan3(t.price);
@@ -2314,7 +2314,41 @@ function renderTickerDetail(code) {
       <td>${valueCell}</td>
     </tr>
   `;
-  }).join('');
+  };
+
+  // Latest-first; dates stay contiguous (walked is date-asc). Insert a per-day summary of
+  // amount + qty after any day that has more than one transaction for this stock.
+  const rowParts = [];
+  let tdCurDate = null;
+  let tdBuf = [];
+  const flushTickerDay = () => {
+    if (!tdBuf.length) return;
+    const date = tdBuf[0].date;
+    for (const t of tdBuf) rowParts.push(renderTxRow(t));
+    if (tdBuf.length > 1) {
+      const buys = tdBuf.filter(t => t.qty > 0);
+      const sells = tdBuf.filter(t => t.qty < 0);
+      const buyQty = buys.reduce((s, t) => s + t.qty, 0);
+      const sellQty = -sells.reduce((s, t) => s + t.qty, 0);
+      const buyAmt = buys.reduce((s, t) => s + t.settle, 0);
+      const sellAmt = sells.reduce((s, t) => s + t.settle, 0);
+      const parts = [];
+      if (buys.length) parts.push(`<span class="gain">매수 ${buyQty.toLocaleString()}주 ${fmtMan(buyAmt, '')}</span>`);
+      if (sells.length) parts.push(`<span class="loss">매도 ${sellQty.toLocaleString()}주 ${fmtMan(sellAmt, '')}</span>`);
+      rowParts.push(`<tr class="day-summary">
+        <td colspan="8" style="font-size:11px">
+          <span class="text-faint">${date} 합계 · </span>${parts.join('<span class="text-faint"> · </span>')}
+        </td>
+      </tr>`);
+    }
+    tdBuf = [];
+  };
+  for (const t of [...walked].reverse()) {
+    if (t.date !== tdCurDate) { flushTickerDay(); tdCurDate = t.date; }
+    tdBuf.push(t);
+  }
+  flushTickerDay();
+  const rows = rowParts.join('');
 
   // Sanity check: simple sum vs current qty
   const simpleSum = txsForCode.reduce((s, t) => s + t.qty, 0);
@@ -2419,7 +2453,15 @@ function applyHistoryFilter() {
   const code = codeSel ? codeSel.value : '';
   const dir = dirSel ? dirSel.value : '';
 
-  let rows = [...state.transactions].reverse();
+  // Display order: by timing — latest day first, and within a day the later-entered
+  // transaction first (seq = sheet row order). Buys and sells interleave by timing rather
+  // than being grouped. NOTE: this is display-only; state.transactions keeps its global
+  // buys-first order that holdings/cash math depends on.
+  let rows = [...state.transactions].sort((a, b) => {
+    if (a.date !== b.date) return a.date < b.date ? 1 : -1;              // date desc
+    if ((b.seq || 0) !== (a.seq || 0)) return (b.seq || 0) - (a.seq || 0); // seq desc (later first)
+    return (a.broker || '') < (b.broker || '') ? -1 : 1;
+  });
   // 'total' = all except ISA; 'all' = every broker; 'ISA' = only ISA; specific broker = filter by that broker
   if (broker === 'total') rows = rows.filter(t => t.broker !== 'ISA');
   else if (broker === 'all') { /* no filter — show every transaction */ }
@@ -2446,9 +2488,23 @@ function applyHistoryFilter() {
     const buyFees = buys.reduce((s, t) => s + t.fees, 0);
     const sellFees = sells.reduce((s, t) => s + t.fees, 0);
     const net = buyAmt - sellAmt;   // positive = net buy (red), negative = net sell (blue)
+    // Transactions first (date shown on the first row of the day), summary after.
+    buf.forEach((t, i) => {
+      html.push(`<tr style="cursor:pointer" onclick="state.selectedCode='${t.code}';switchTab('overview')">
+        <td>${i === 0 ? `<b>${date}</b>` : ''}</td>
+        <td style="font-size:11px;color:var(--accent)">${escapeHtml((t.broker || '').replace('국내', ''))}</td>
+        <td><span style="font-weight:600">${escapeHtml((state.names[t.code] || t.code).slice(0, 18))}</span> <span class="text-faint" style="font-size:11px">${t.code}</span></td>
+        <td class="${t.qty > 0 ? 'gain' : 'loss'}">${t.qty > 0 ? '매수' : '매도'}</td>
+        <td>${signed(t.qty)}</td>
+        <td>${fmtMan2(t.price)}</td>
+        <td>${fmtMan3(t.fees)}</td>
+        <td>${fmtMan2(t.settle)}</td>
+      </tr>`);
+    });
     html.push(`<tr class="day-summary">
-      <td><b>${date}</b></td>
+      <td></td>
       <td colspan="7" style="font-size:11px">
+        <span class="text-faint">${date} 합계 · </span>
         <span class="gain">매수 ${buys.length}건 ${fmtMan(buyAmt, '')}</span>
         <span class="text-faint"> · </span>
         <span class="loss">매도 ${sells.length}건 ${fmtMan(sellAmt, '')}</span>
@@ -2458,18 +2514,6 @@ function applyHistoryFilter() {
         수수료 ${fmtMan3(buyFees + sellFees)}
       </td>
     </tr>`);
-    for (const t of buf) {
-      html.push(`<tr style="cursor:pointer" onclick="state.selectedCode='${t.code}';switchTab('overview')">
-        <td></td>
-        <td style="font-size:11px;color:var(--accent)">${escapeHtml((t.broker || '').replace('국내', ''))}</td>
-        <td><span style="font-weight:600">${escapeHtml((state.names[t.code] || t.code).slice(0, 18))}</span> <span class="text-faint" style="font-size:11px">${t.code}</span></td>
-        <td class="${t.qty > 0 ? 'gain' : 'loss'}">${t.qty > 0 ? '매수' : '매도'}</td>
-        <td>${signed(t.qty)}</td>
-        <td>${fmtMan2(t.price)}</td>
-        <td>${fmtMan3(t.fees)}</td>
-        <td>${fmtMan2(t.settle)}</td>
-      </tr>`);
-    }
     buf = [];
   };
   for (const t of display) {
