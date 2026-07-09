@@ -2332,9 +2332,12 @@ function renderTickerDetail(code) {
       const sellQty = -sells.reduce((s, t) => s + t.qty, 0);
       const buyAmt = buys.reduce((s, t) => s + t.settle, 0);
       const sellAmt = sells.reduce((s, t) => s + t.settle, 0);
+      // Average price = qty-weighted mean of the trade price (단가), shown in the same 만 units.
+      const buyAvg = buyQty ? buys.reduce((s, t) => s + t.price * t.qty, 0) / buyQty : 0;
+      const sellAvg = sellQty ? sells.reduce((s, t) => s + t.price * Math.abs(t.qty), 0) / sellQty : 0;
       const parts = [];
-      if (buys.length) parts.push(`<span class="gain">매수 ${buyQty.toLocaleString()}주 ${fmtMan(buyAmt, '')}</span>`);
-      if (sells.length) parts.push(`<span class="loss">매도 ${sellQty.toLocaleString()}주 ${fmtMan(sellAmt, '')}</span>`);
+      if (buys.length) parts.push(`<span class="gain">매수 ${buyQty.toLocaleString()}주 ${fmtMan(buyAmt, '')} (평균 ${fmtMan3(buyAvg)})</span>`);
+      if (sells.length) parts.push(`<span class="loss">매도 ${sellQty.toLocaleString()}주 ${fmtMan(sellAmt, '')} (평균 ${fmtMan3(sellAvg)})</span>`);
       rowParts.push(`<tr class="day-summary">
         <td colspan="8" style="font-size:11px">
           <span class="text-faint">${date} 합계 · </span>${parts.join('<span class="text-faint"> · </span>')}
