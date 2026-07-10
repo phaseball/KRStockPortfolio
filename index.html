@@ -981,6 +981,46 @@ function computeHoldings(txs) {
   return holds;
 }
 
+// Scope-aware holdings for DISPLAY. For a specific broker (or ISA) this is identical to
+// computeHoldings over that broker's txs. For 'total'/'all', holdings are computed PER
+// BROKER and then merged per code: qty and cost basis (qty×avgCost) are summed and avgCost
+// is recomputed as costBasis/qty. This matters because pooling every broker's lots into a
+// single moving-average avgCost makes 매수금액 (=qty×avgCost) NON-additive across broker
+// tabs once any sells occur — so the 전체 tab wouldn't equal the sum of the platform tabs.
+// qty and 평가금액 (qty×price) are additive either way; only the cost basis needs this.
+function computeHoldingsScoped(broker) {
+  if (broker !== 'total' && broker !== 'all') {
+    return computeHoldings(getTxsForBroker(broker));
+  }
+  const scopeBrokers = BROKERS.filter(b => broker === 'all' ? true : b !== 'ISA');
+  const merged = {};
+  for (const b of scopeBrokers) {
+    const hb = computeHoldings(state.transactions.filter(t => t.broker === b));
+    for (const code in hb) {
+      const s = hb[code];
+      const m = merged[code] || (merged[code] = {
+        qty: 0, avgCost: 0, _cost: 0,
+        realizedPL: 0, realizedPLThisYear: 0, realizedPLToday: 0,
+        cashFlowToday: 0, buyCount: 0, sellCount: 0,
+      });
+      m.qty += s.qty;
+      m._cost += s.qty * s.avgCost;   // additive cost basis of remaining shares
+      m.realizedPL += s.realizedPL;
+      m.realizedPLThisYear += s.realizedPLThisYear;
+      m.realizedPLToday += s.realizedPLToday;
+      m.cashFlowToday += s.cashFlowToday;
+      m.buyCount += s.buyCount;
+      m.sellCount += s.sellCount;
+    }
+  }
+  for (const code in merged) {
+    const m = merged[code];
+    m.avgCost = m.qty > 0 ? m._cost / m.qty : 0;
+    delete m._cost;
+  }
+  return merged;
+}
+
 function computeSummary(txs, holds, prices, initialCash) {
   // Cash: tracks actual cash flow including fees (settle column = gross ± fees)
   let buyTotal = 0, sellTotal = 0, feesTotal = 0;
@@ -1081,7 +1121,7 @@ function renderOverview() {
 
   const txs = getTxsForBroker(state.activeBroker);
   const initialCash = getInitialCashForBroker(state.activeBroker);
-  const holds = computeHoldings(txs);
+  const holds = computeHoldingsScoped(state.activeBroker);
 
   // ---- US_v4-style display: use daily_value_kr as the single source of truth ----
   // The 4 cards (총수익, 현금, 평가손익, 실현손익) and their daily changes are derived
@@ -2224,7 +2264,7 @@ function renderTickerDetail(code) {
   // (Previously we walked ALL transactions which over-counted for users on 전체/ISA tabs.)
   const brokerTxs = getTxsForBroker(state.activeBroker);
   const txs = brokerTxs.filter(t => t.code === code);
-  const holds = computeHoldings(brokerTxs);
+  const holds = computeHoldingsScoped(state.activeBroker);
   const h = holds[code] || { qty: 0, avgCost: 0, realizedPL: 0, realizedPLThisYear: 0 };
   const priceObj = state.prices[code];
   const curPrice = priceObj ? priceObj.price : null;
