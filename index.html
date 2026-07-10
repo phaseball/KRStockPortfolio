@@ -2357,7 +2357,7 @@ function renderTickerDetail(code) {
   };
 
   // Latest-first; dates stay contiguous (walked is date-asc). Insert a per-day summary of
-  // amount + qty after any day that has more than one transaction for this stock.
+  // amount + qty (+ avg price) after every day for this stock.
   const rowParts = [];
   let tdCurDate = null;
   let tdBuf = [];
@@ -2365,7 +2365,7 @@ function renderTickerDetail(code) {
     if (!tdBuf.length) return;
     const date = tdBuf[0].date;
     for (const t of tdBuf) rowParts.push(renderTxRow(t));
-    if (tdBuf.length > 1) {
+    {
       const buys = tdBuf.filter(t => t.qty > 0);
       const sells = tdBuf.filter(t => t.qty < 0);
       const buyQty = buys.reduce((s, t) => s + t.qty, 0);
